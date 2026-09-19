@@ -10,29 +10,29 @@ the next line's `prev_hash`. Hiding an edit means rewriting every entry after it
 anchoring proofs below are what stop that.
 
 A `seal` entry says a prediction was committed to on a stated day. It carries two
-commitments — one to the prediction, one to a private context we never open — a cluster
-pseudonym, the day, and the hash of the policy it was sealed under. It carries nothing
-about the claim, not even its category, because a prediction can be open for a year and a
-few hundred categories and resolution dates would draw the shape of our open book.
+commitments — one to the prediction, one to material that is never opened — a cluster
+pseudonym, the day, the quarter the prediction comes due, and the hash of the policy it was
+sealed under. It carries nothing about the claim, not even its category: a prediction can
+stay sealed for a year, and a few hundred categories and resolution dates would describe
+everything still outstanding.
 
 A `reveal` entry opens one: the full prediction, the nonce, the outcome, the citation that
-settled it, and the category, tier and dates the seal entry withheld. By then the position
-those describe is closed.
+settled it, and the category, tier and dates the seal entry withheld.
 
 A reveal marked `"withheld": true` is the one exception, and it is a narrow one. Where the
-claim's own wording would reveal how we work, the text and its nonce stay unpublished — but
-the outcome, the category, the tier, the dates and the cluster are published exactly as
-usual, and the prediction is counted in every statistic on the scoreboard. Withholding
-removes the words; it never removes a result. The count of withheld reveals is published
-under `accounting.text_withheld`, so you can see how often we use it.
+claim's own wording cannot be published, the text and its nonce stay unpublished — but the
+outcome, the category, the tier, the dates and the cluster are published exactly as usual,
+and the prediction is counted in every statistic on the scoreboard. Withholding removes the
+words; it never removes a result. The count of withheld reveals is published under
+`accounting.text_withheld`, so you can see how often it is used.
 
-Two things are deliberately **not** in this file. Entries carry an `actor_digest` rather
-than a signature: the digest tells you which entries share a signer, and the envelope
-behind it — key ids, host names, signatures — stays with us, because you have no reason to
-trust our internal keyring and a long run of signatures under one key is a gift to whoever
-wants to attack it. And seal and reveal times are days, not instants; `scoreboard.json`
-carries `seals_by_day` so you can still see whether this record was built steadily or
-assembled in one sitting.
+Two things are deliberately **not** in this file. Entries carry an `actor_digest` in place
+of a signature: the digest tells you which entries share a signer and nothing else, and a
+signature is only worth checking against a key you have some reason to trust, which is not
+the case for any key that signs an entry as it is written. The signature that is worth
+checking is the one on `tip.json`, whose key is published; it is covered below. And seal and
+reveal times are days, not instants; `scoreboard.json` carries `seals_by_day` so you can
+still see whether this record was built steadily or assembled in one sitting.
 
 ## Check the chain
 
@@ -60,11 +60,11 @@ and that commitment appears in an earlier `seal` entry with an earlier `sealed_o
 does, the prediction you are reading is exactly the one committed to on that day, and it
 was committed to before its outcome was knowable.
 
-The `seal_seq` on the reveal names that entry's position, so you can find it in one step —
+The `seal_seq` on the reveal names where that entry sits, so you can find it in one step —
 but check the commitment rather than trusting the pointer.
 
 The nonce is why a commitment cannot be brute-forced: without it, anyone could grid over
-plausible claims, hash each one, and read the private book straight off this file.
+plausible claims, hash each one, and read every unopened prediction straight off this file.
 
 ## Check that we did not hide our misses
 
@@ -91,9 +91,29 @@ excluded, you will see it in the same file.
 
 ## Check a publication, where `tip.json` is present
 
+This is the one check that needs something beyond the Python standard library: Ed25519
+verification.
+
+    python3 -m pip install cryptography
+
+If you would rather not take a package on trust either, pin it: put the version you want and
+its SHA-256 hashes from PyPI in a requirements file and install with
+`python3 -m pip install --require-hashes -r <that file>`. It is the same package this record
+is signed with.
+
+`verify.py` makes every other check without it, and names the one it could not make rather
+than printing a pass it did not earn. Its three exit codes are normative, so a script can
+tell a broken record from a broken machine:
+
+    0   every check below passed on these files
+    1   a check FAILED — something about this record does not hold
+    2   a check could not be MADE on this machine; nothing failed
+
+Only exit 1 is a statement about the record.
+
 `tip.json` carries the chain's tip digest, the number of entries it covers, the day it was
-exported, the signing envelope under `actor` — which names no host, by construction — and
-under `public_keys` the public half of the key that made it. Reconstruct the signed bytes as
+exported, the signing envelope under `actor`, and under `public_keys` the public half of the
+key that made it. Reconstruct the signed bytes as
 
     b"sd/core/actor/v1" + b"\x00" + canonical_json({
         "actor": <the envelope in this file, minus its signature>,
@@ -101,9 +121,9 @@ under `public_keys` the public half of the key that made it. Reconstruct the sig
     })
 
 and verify the signature against that public key. It tells you this exact file came from
-us. It is a different key from the one that signs our internal records, on purpose: this
-one is published and therefore under study, and losing it would let somebody forge a
-publication you can detect, not a seal you cannot.
+us. It is deliberately not the key that signs an entry as it is written: this one is
+published and therefore under study, and losing it would let somebody forge a publication
+you can detect, not a commitment you cannot.
 
 ## What this does and does not prove
 
@@ -115,3 +135,11 @@ commit the chain's tip into Bitcoin through OpenTimestamps. Where those proofs a
 verify them with `ots verify`, and the tip they cover existed before the block they name.
 Where `scoreboard.json` reports `anchoring.anchored` as false, this record proves ordering
 only, and says so rather than implying more.
+
+The counts under `anchoring` are counts of **anchor attempts**, one per publication that has
+been stamped, and they are not the count of publications: that is the length of
+`publications.jsonl`. `attempted` is how many publications have an anchor row at all,
+and it splits exactly into `confirmed` (a proof in a Bitcoin block), `pending` (submitted,
+not yet in a block) and `failed` (the calendar could not be reached, recorded rather than
+retried into silence). A publication with no row at all is counted in none of them, and
+`contiguous` is false with `first_gap_at_seq` naming the first one missing.

@@ -3,22 +3,30 @@
 
     python3 verify.py [directory]
 
-Exits 0 if everything checks out, 1 otherwise, and names the first thing that failed.
+Three exit codes, so a script can tell them apart:
 
-This file is published alongside the record. It imports the Python standard library and
-nothing else — no dependencies, no network, no code of ours. That is deliberate: a record
-that can only be verified by running its author's application is not a public record.
+    0   every check in VERIFY.md passed on these files
+    1   a check FAILED — something about this record does not hold
+    2   a check could not be MADE on this machine; nothing failed
+
+This file is published alongside the record. It opens no network connection and imports no
+code of ours. That is deliberate: a record that can only be verified by running its author's
+application is not a public record.
+
+One check needs one package. Verifying the Ed25519 signature on tip.json needs
+`cryptography`, which is not in the standard library; everything else here is. A run that
+cannot make that check exits 2 and names it, rather than printing a pass it did not earn.
+Exit 2 is not an accusation against the record; exit 1 is.
 
 VERIFY.md is the normative version of these checks and is written so that you can
 reimplement them yourself in about twenty lines. If this script and VERIFY.md ever disagree,
 VERIFY.md is right and this script is the bug. If you want the strongest form of the check,
 write your own from VERIFY.md and do not run this at all.
 
-Two things this script cannot do. It does not check the Bitcoin timestamps: run `ots verify`
-on the proofs in anchors/, ideally against your own node (`ots verify -b <datadir>`), since
-`ots verify` alone asks a block explorer and believes the answer. And it checks the Ed25519
-signature in tip.json only if you have `cryptography` installed, because that is not in the
-standard library; without it the script says so rather than passing the check quietly.
+One thing this script does not do at all. It does not check the Bitcoin timestamps: run
+`ots verify` on the proofs in anchors/, ideally against your own node
+(`ots verify -b <datadir>`), since `ots verify` alone asks a block explorer and believes the
+answer.
 """
 
 from __future__ import annotations
@@ -95,12 +103,23 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 class Report:
     def __init__(self) -> None:
         self.failures: list[str] = []
+        self.unmade: list[str] = []
         self.notes: list[str] = []
 
     def check(self, ok: bool, message: str) -> bool:
         if not ok:
             self.failures.append(message)
         return ok
+
+    def cannot_check(self, message: str) -> None:
+        """A check this run could not make. Not a pass, and not a failure of the record.
+
+        Kept apart from ``failures`` on purpose. "The signature is wrong" and "I could not
+        check the signature" are different statements about the record and only one of them
+        is an accusation, so they exit 1 and 2 respectively. Both are non-zero, because the
+        alternative is a green run that quietly skipped a step.
+        """
+        self.unmade.append(message)
 
     def note(self, message: str) -> None:
         self.notes.append(message)
@@ -238,8 +257,8 @@ def verify_sample_size(
 ) -> None:
     """Step 4: the effective sample size is the group count, so check the group count.
 
-    Two counts, and the second is the one that matters. Clusters say how many distinct theses
-    were taken; correlation groups say how many independent bets those amount to, and every
+    Two counts, and the second is the one that matters. Clusters say how many distinct claims
+    were made; correlation groups say how many independent ones those amount to, and every
     interval on the scoreboard is resampled over groups. A record that inflates either is
     claiming a larger sample than it has.
     """
@@ -426,14 +445,22 @@ def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> 
     if not isinstance(actor, dict) or not public_keys:
         report.check(False, "tip.json carries no actor envelope or no public key to check it")
         return
+    # A broken install is caught as widely as a missing one. An import of `cryptography`
+    # whose native half is unusable does not raise ImportError: it can abort inside the Rust
+    # extension and surface as a panic, which does not inherit from Exception, and a reader
+    # checking a record should get one plain line rather than somebody else's traceback.
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    except ImportError:
-        report.note(
-            "tip.json: present, and its tip and entry count match this chain. The Ed25519 "
-            "signature was NOT checked — that needs `pip install cryptography`, which is not "
-            "in the standard library. VERIFY.md gives the bytes to check it against."
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as error:  # noqa: BLE001
+        report.cannot_check(
+            "tip.json: its tip and entry count match this chain, but the Ed25519 signature "
+            "was NOT checked. That needs the `cryptography` package, which is the only thing "
+            f"here outside the standard library, and importing it failed: {type(error).__name__}. "
+            "Install it with `python3 -m pip install cryptography` and run this again; "
+            "VERIFY.md gives the bytes to check the signature against by hand."
         )
         return
     signed = {
@@ -533,6 +560,13 @@ def main(argv: list[str]) -> int:
         for extra in report.failures[1:]:
             print(f"  (also) {extra}")
         return 1
+    if report.unmade:
+        print()
+        print(f"INCOMPLETE: {len(report.unmade)} check(s) could not be made on this machine.")
+        print("Nothing here failed — that is exit 1. This is exit 2. What was not checked:")
+        for message in report.unmade:
+            print(f"  {message}")
+        return 2
     print()
     print("OK. Every check in VERIFY.md passes on these files.")
     return 0

@@ -1,31 +1,14 @@
 {
   "files": {
-    ".git/HEAD": "28d25bf82af4c0e2b72f50959b2beb859e3e60b9630a5e8c603dad4ddb2b6e80",
-    ".git/config": "0d20d08edab5b700620423cdea68b630aa94cef09679f6a4d4e23ef24186fcb9",
-    ".git/description": "85ab6c163d43a17ea9cf7788308bca1466f1b0a8d1cc92e26e9bf63da4062aee",
-    ".git/hooks/applypatch-msg.sample": "0223497a0b8b033aa58a3a521b8629869386cf7ab0e2f101963d328aa62193f7",
-    ".git/hooks/commit-msg.sample": "1f74d5e9292979b573ebd59741d46cb93ff391acdd083d340b94370753d92437",
-    ".git/hooks/fsmonitor-watchman.sample": "e0549964e93897b519bd8e333c037e51fff0f88ba13e086a331592bf801fa1d0",
-    ".git/hooks/post-update.sample": "81765af2daef323061dcbc5e61fc16481cb74b3bac9ad8a174b186523586f6c5",
-    ".git/hooks/pre-applypatch.sample": "e15c5b469ea3e0a695bea6f2c82bcf8e62821074939ddd85b77e0007ff165475",
-    ".git/hooks/pre-commit.sample": "f9af7d95eb1231ecf2eba9770fedfa8d4797a12b02d7240e98d568201251244a",
-    ".git/hooks/pre-merge-commit.sample": "d3825a70337940ebbd0a5c072984e13245920cdf8898bd225c8d27a6dfc9cb53",
-    ".git/hooks/pre-push.sample": "ecce9c7e04d3f5dd9d8ada81753dd1d549a9634b26770042b58dda00217d086a",
-    ".git/hooks/pre-rebase.sample": "4febce867790052338076f4e66cc47efb14879d18097d1d61c8261859eaaa7b3",
-    ".git/hooks/pre-receive.sample": "a4c3d2b9c7bb3fd8d1441c31bd4ee71a595d66b44fcf49ddb310252320169989",
-    ".git/hooks/prepare-commit-msg.sample": "e9ddcaa4189fddd25ed97fc8c789eca7b6ca16390b2392ae3276f0c8e1aa4619",
-    ".git/hooks/push-to-checkout.sample": "a53d0741798b287c6dd7afa64aee473f305e65d3f49463bb9d7408ec3b12bf5f",
-    ".git/hooks/update.sample": "8d5f2fa83e103cf08b57eaa67521df9194f45cbdbcb37da52ad586097a14d106",
-    ".git/info/exclude": "6671fe83b7a07c8932ee89164d1f2793b2318058eb8b98dc5c06ee0a5a3b0ec1",
-    "README.md": "eeb56b6cb140edd0a847e12c06f6dc7a495b8ef3ccdc6e75d78b8747f0d7d6da",
-    "VERIFY.md": "ff0cadf52fab9a4823082482c4ca4a18f07014e6f7a9b430c4e0ad35fdc79e74",
-    "canon-vectors.json": "ee25cabdad433da8055fd003f559305804726fdaecd5f868e429cdba86101861",
+    "README.md": "b30072b1622ff98a61d9a46aad1aeb6bfbfe3138d882d23c8d39adc0c81fb415",
+    "VERIFY.md": "31e73ecd930347ad66cae04ac87f572e50551cfcb629354073ef96fc91b7e8eb",
+    "canon-vectors.json": "adba2b1f6b608810c54b165446997da4a9fe9bb261947b2839894c36cd358389",
     "chain.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "publications.jsonl": "69f9996bdce0aec3828affe97da4a59b81e382e23052bd52c3b1a8bb48d0b636",
+    "publications.jsonl": "85b13c11709d4a672ba9a0bba1e0fb3fc1197038c820092621f22c55cabfac83",
     "reveals.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scoreboard.json": "9b5969b4206d33cb0db6030708f3825ab3585ebf284d148c127b65b9c22e631b",
-    "tip.json": "37923e431bbee8a911d6087fd45a57ff8d4e431316def3dae14e102fd2c35e44",
-    "verify.py": "d7688182cef273f518cd854b90fdec480a13ff0dac9118174153b882de908e97"
+    "scoreboard.json": "6a08cd15ac0d4bacb187fddcf9230a1c643941d95a563665223f1792ff58729b",
+    "tip.json": "7ae8a34fa9743e2b62389592d12a461164ce5fe8e7d933a284598f89d5e9cead",
+    "verify.py": "77a9cbf1f1c3215a5949d79421b715e81dabc5a5f73a5cfefae3d9cd01b148c1"
   },
   "note": "anchors/ is excluded on purpose: the manifest covers the record, the anchor index points at the manifest, and nothing hashes itself."
 }
