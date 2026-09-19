@@ -1,0 +1,17 @@
+{
+  "actor": {
+    "id": "publisher",
+    "key_id": "7fb92f0f0dce1ae7",
+    "key_role": "publish",
+    "kind": "system",
+    "mode": "production",
+    "runtime_instance": "public",
+    "signature": "ee37acd6f453cd22443ed9d12a246ffa30d9a4ce17148fbafb1922575a97ab78f375ecd2e2f4e9e1a1f42b81368fd9fc35ffa6ed59440aea48fbadfdf7aadd0a"
+  },
+  "entries": 0,
+  "exported_at": "2026-09-19T04:51:45.989245+00:00",
+  "public_keys": {
+    "7fb92f0f0dce1ae7": "7fb92f0f0dce1ae7839a6f133e2a57e953b422b9363fe3b306e96f7b72113665"
+  },
+  "tip": null
+}

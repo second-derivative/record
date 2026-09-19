@@ -1,0 +1,116 @@
+{
+  "note": "Shared canonical-JSON and digest contract for the Record, the Map and the runtime. All three chains must produce identical bytes and identical digests for these inputs, or a cross-checked record is not cross-checkable. Serialisation is sorted keys, separators (\",\", \":\"), ensure_ascii true, values normalised to JSON-native types before dumping rather than through a serialiser hook.",
+  "floats_are_refused": {
+    "rule": "A float is never serialised. An implementation MUST raise rather than emit a number for any float it is handed, anywhere in a payload, before hashing. Exact numbers travel as decimal strings, quantised once at the boundary.",
+    "why": "Python and JavaScript both print doubles with a shortest-round-trip algorithm and still disagree: 1e-07 against 1e-7, 1e+21 against 1e21, -0.0 against 0, and 1e+16 against 10000000000000000. An outsider recomputing one of our commitments in a browser would then fail to verify an honest record.",
+    "must_refuse": [
+      "0.1",
+      "1e-07",
+      "1e21",
+      "-0.0",
+      "1e16",
+      "NaN",
+      "Infinity"
+    ],
+    "decimal_form": "Fixed-point, never scientific: format(d, 'f'), so 1E-7 is written 0.0000001 and 1E+21 is written 1000000000000000000000. An implementation must not have to reproduce another language's exponent rules.",
+    "quantisation": "Six decimal places for probabilities. Quantising a non-zero value to zero is itself refused: it would seal a different claim than the one intended.",
+    "instead": {
+      "0.1": "0.100000",
+      "0.45": "0.450000",
+      "130000": "130000.000000"
+    }
+  },
+  "domains": {
+    "note": "Every digest is prefixed with a domain tag and a 0x00 separator, so two different claims about two different objects can never be confusable. An implementation that omits the tag produces digests that verify against nothing.",
+    "commit": "sd/record/commit/v1",
+    "entry": "sd/record/entry/v1",
+    "context": "sd/record/context/v1",
+    "cluster_pseudonym": "sd/record/cluster/v1",
+    "correlation_group_pseudonym": "sd/record/correlation-group/v1",
+    "actor_signature": "sd/core/actor/v1",
+    "actor_digest": "sd/core/actor-digest/v1"
+  },
+  "signatures": {
+    "algorithm": "Ed25519",
+    "note": "Signed bytes are the actor signature domain, a 0x00 separator, then the canonical JSON of {\"actor\": <envelope without its signature>, \"payload\": <what is being attested>}. Verification needs only the public key.",
+    "key_roles": {
+      "attestation": "signs what the firm writes to itself; public half stays internal",
+      "publish": "signs what the firm publishes; public half goes out with the record"
+    }
+  },
+  "pseudonyms": {
+    "note": "A pseudonym is sha256(domain || 0x00 || salt || 0x00 || canonical_json({field: value})) under one long-lived secret salt of at least 32 bytes. It publishes the partition without the names, so a reader can count the blocks every statistic rests on.",
+    "cluster_field": "cluster_id",
+    "correlation_group_field": "group_id"
+  },
+  "digest": "sha256, full 64 hex characters, never truncated",
+  "cases": [
+    {
+      "name": "empty-object",
+      "canonical_json": "{}",
+      "sha256_of_canonical": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "key-order",
+      "canonical_json": "{\"A\":3,\"a\":2,\"b\":1}",
+      "sha256_of_canonical": "e36823485c211bdf27aa7bb577fe79ba2ad122cfbb95023ae886736fd48e9b7c"
+    },
+    {
+      "name": "nested",
+      "canonical_json": "{\"a\":true,\"z\":{\"y\":[1,2,{\"x\":null}]}}",
+      "sha256_of_canonical": "1fbfda70b807d76b1b40f70aa293a919fb862f10311c76156c1b22baf660c41f"
+    },
+    {
+      "name": "unicode",
+      "canonical_json": "{\"k\":\"TSMC \\u53f0\\u7a4d\\u96fb \\u2014 CoWoS\"}",
+      "sha256_of_canonical": "7cc7a17729f254b4d7d7bc93b8fa451e1bd1a92667a8308f38b545786d528536"
+    },
+    {
+      "name": "exact-decimals",
+      "canonical_json": "{\"a\":\"1.000000\",\"b\":\"0.100000\",\"c\":\"0.450000\",\"d\":\"130000.000000\",\"e\":\"1000000000000000000000\"}",
+      "sha256_of_canonical": "3b631820766ddba302b958f0895fc89badd2cdfc0df16c94c09b99c18702d6bf"
+    },
+    {
+      "name": "small-and-large",
+      "canonical_json": "{\"big\":\"12345678901234567890\",\"tiny\":\"0.000000100\"}",
+      "sha256_of_canonical": "a05a770d774d27d57ddc1d82975d0100a49ffc36af6884445aba103905008cef"
+    },
+    {
+      "name": "ints-and-bools",
+      "canonical_json": "{\"f\":false,\"i\":1000000000000000000,\"n\":null,\"t\":true}",
+      "sha256_of_canonical": "2e3cf6a8dab6df76a760694991b8f7ef70b6e6df35164b8f1bf03b2811b5ad5f"
+    },
+    {
+      "name": "list-of-objects",
+      "canonical_json": "[{\"b\":1},{\"a\":2}]",
+      "sha256_of_canonical": "49bacb43da62160b7e07a101638ab7a571869771f596730bc05e5d0f371e2b51"
+    },
+    {
+      "name": "empty-string-key",
+      "canonical_json": "{\"\":\"empty\"}",
+      "sha256_of_canonical": "441137806e68237b5e2ef9f94e7cc9cd8ffa5f0d7aff01a42eb3e83c37368525"
+    },
+    {
+      "name": "escapes",
+      "canonical_json": "{\"s\":\"line\\nbreak\\ttab \\\"quote\\\" back\\\\slash\"}",
+      "sha256_of_canonical": "e3abd3da9f9075a4a6630f48d0ad3f3c18467071b10986fe21a0dc7941e42758"
+    }
+  ],
+  "entry_hash_example": {
+    "entry": {
+      "kind": "seal",
+      "seq": 0,
+      "prev_hash": "genesis"
+    },
+    "recipe": "sha256(entry_domain + b'\\x00' + canonical_json(entry_without_entry_hash))",
+    "entry_hash": "71d2e48d9ef293049b24b1343a008aad446274737982c494b54aa957a2042cbf"
+  },
+  "commitment_example": {
+    "payload": {
+      "claim": "example"
+    },
+    "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+    "recipe": "sha256(commit_domain + b'\\x00' + canonical_json(payload) + b'\\x00' + nonce_bytes)",
+    "commitment": "e8877149e262f72564d5773ba2b8b74fb0b70127b10728a664ead9ac1b962e89"
+  }
+}

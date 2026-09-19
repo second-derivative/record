@@ -1,0 +1,24 @@
+{
+  "anchoring": {
+    "anchored": false,
+    "confirmed": 0,
+    "confirmed_through_seq": null,
+    "contiguous": true,
+    "first_gap_at_seq": null,
+    "note": "The chain proves ordering. Until a proof has confirmed in a Bitcoin block it does not prove when entries were written, and this record does not claim it does.",
+    "pending": 0,
+    "publications": 0
+  },
+  "chain": {
+    "entries": 0,
+    "intact": true,
+    "tip": null
+  },
+  "exported_at": "2026-09-19T04:51:45.989245+00:00",
+  "recomputation": {
+    "bootstrap_confidence": 0.95,
+    "bootstrap_draws": 10000,
+    "bootstrap_seed": 20260918,
+    "instructions": "VERIFY.md"
+  }
+}
