@@ -1,6 +1,7 @@
 {
   "anchoring": {
     "anchored": false,
+    "anchored_from_seq": null,
     "attempted": 0,
     "confirmed": 0,
     "confirmed_through_seq": null,
@@ -15,7 +16,7 @@
     "intact": true,
     "tip": null
   },
-  "exported_at": "2026-09-19T06:29:40.626098+00:00",
+  "exported_at": "2026-09-20T05:00:06.915848+00:00",
   "recomputation": {
     "bootstrap_confidence": 0.95,
     "bootstrap_draws": 10000,

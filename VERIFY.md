@@ -125,16 +125,54 @@ us. It is deliberately not the key that signs an entry as it is written: this on
 published and therefore under study, and losing it would let somebody forge a publication
 you can detect, not a commitment you cannot.
 
+## Check the timestamps
+
+`anchors/` holds, for each publication, three things: `<digest>.txt`, which contains that
+publication's `MANIFEST.json` digest as 64 hex characters; `<digest>.txt.ots`, an
+OpenTimestamps proof **of that file**; and a line in `anchors/index.jsonl` tying the pair to
+a publication sequence number.
+
+`verify.py` reads the proofs and checks both links offline: that the proof really is a proof
+of the bytes in the `.txt` beside it, and that those bytes are the manifest digest its row
+claims. That check is structural. It says the proof is over what we claim it is over; it
+says nothing about Bitcoin, and it cannot, because that takes a node. For that:
+
+    python3 -m pip install opentimestamps-client
+    ots verify anchors/<digest>.txt.ots
+
+That command needs a Bitcoin node it can reach — the reference client queries one over RPC,
+using your local configuration or `--bitcoin-node <url>` — and exits without checking
+anything if it has none. It does not fall back to a block explorer. So the strong form of
+this check is one only you can make, on a node you trust, which is the point: we are not a
+party to it.
+
+Run against a node, `ots verify` prints the block **time**. We do not publish one. A Bitcoin
+attestation carries a height and nothing else, the block's time is in its header, and we will
+not add a block explorer to this system to fetch a number you can read off the chain
+yourself — so `block_time` in the index is always `null`, deliberately, and `block_height` is
+what we record.
+
+`confirmed` in the index and in `scoreboard.json` means the calendar returned a proof
+carrying a Bitcoin attestation. It does **not** mean we checked that block. That is why this
+section exists and why `ots verify` is the last word.
+
+`anchors/index.jsonl` is the one file in a publication that changes. A row only ever goes
+from pending to confirmed, and the digest it names is fixed by the proof the calendar holds.
+It is outside `MANIFEST.json` on purpose: the manifest covers the record, the anchor index
+points at the manifest, and nothing hashes itself.
+
 ## What this does and does not prove
 
 The chain proves **order** and makes silent edits evident.
 
 It does not, on its own, prove **when** entries were written — a chain built in one sitting
-after the outcomes were known would still verify. That requires the anchoring proofs, which
-commit the chain's tip into Bitcoin through OpenTimestamps. Where those proofs are present,
-verify them with `ots verify`, and the tip they cover existed before the block they name.
+after the outcomes were known would still verify. That requires the anchoring proofs above.
 Where `scoreboard.json` reports `anchoring.anchored` as false, this record proves ordering
 only, and says so rather than implying more.
+
+A publication is stamped as it is delivered, which is after the files you are reading were
+built, so the newest publication's row travels with the *next* publication. One behind is
+the normal state; two behind is a record that stopped anchoring, and `verify.py` fails on it.
 
 The counts under `anchoring` are counts of **anchor attempts**, one per publication that has
 been stamped, and they are not the count of publications: that is the length of
@@ -143,3 +181,8 @@ and it splits exactly into `confirmed` (a proof in a Bitcoin block), `pending` (
 not yet in a block) and `failed` (the calendar could not be reached, recorded rather than
 retried into silence). A publication with no row at all is counted in none of them, and
 `contiguous` is false with `first_gap_at_seq` naming the first one missing.
+
+`anchored_from_seq` names the first publication that has a row. It is not zero on this
+record and never will be: the first publications were made before this record was anchored
+at all, and a timestamp taken today would say today. That is the honest thing to publish,
+and it is why a run starting above zero is not read as a gap.

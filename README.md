@@ -19,7 +19,7 @@ It is published so that the claim can be checked by someone who assumes we are l
 | `reveals.jsonl` | the opened predictions, pulled out of the chain for convenience |
 | `scoreboard.json` | every metric, the counts, the refusals, and the worst-case bound |
 | `publications.jsonl` | one line per publication, so the sequence can be checked for gaps |
-| `anchors/` | OpenTimestamps proofs committing each publication into Bitcoin |
+| `anchors/` | each publication's manifest digest, its OpenTimestamps proof, and an index over both |
 | `tip.json` | the signed chain tip, and the public half of the key that signed it |
 | `MANIFEST.json` | the SHA-256 of every file above |
 | `VERIFY.md` | the verification procedure, normative |
@@ -59,7 +59,14 @@ right and `verify.py` is the bug — and the strongest form of the check is to w
   cluster floor. It says so in words instead of printing a number somebody will quote.
 - **Until a proof in `anchors/` has confirmed, this record proves order and not time.** A chain
   built in one sitting after the outcomes were known would still verify. The timestamps are what
-  close that, and `scoreboard.json` reports the state as it is.
+  close that, and `scoreboard.json` reports the state as it is. A fresh proof is *pending* for
+  hours: a calendar's promise to include a digest is not a timestamp, and nothing here counts one
+  as one.
+- **`confirmed` is the calendar's word, not the chain's.** `verify.py` checks the proofs
+  structurally and never asks Bitcoin anything. To ask it, run `ots verify` on the files in
+  `anchors/`; that needs a Bitcoin node it can reach and checks nothing without one. Which is the
+  whole point of using a format somebody else's tool reads: the last check is yours, on a node we
+  are not a party to.
 - **What this cannot prove** is the last section of `VERIFY.md`, including the one attack no
   self-published record closes. It is worth reading before believing any of the rest.
 

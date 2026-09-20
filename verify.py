@@ -23,10 +23,16 @@ reimplement them yourself in about twenty lines. If this script and VERIFY.md ev
 VERIFY.md is right and this script is the bug. If you want the strongest form of the check,
 write your own from VERIFY.md and do not run this at all.
 
-One thing this script does not do at all. It does not check the Bitcoin timestamps: run
-`ots verify` on the proofs in anchors/, ideally against your own node
-(`ots verify -b <datadir>`), since `ots verify` alone asks a block explorer and believes the
-answer.
+One thing this script does not do at all. It does not check the Bitcoin timestamps. Its
+anchor checks are structural: that each proof is a proof of the bytes beside it and that
+those bytes are the manifest digest the row claims. Whether the block it names exists, and
+what is in it, this script never asks, because asking means a Bitcoin node and this script
+is twenty lines of standard library you can read in one sitting.
+
+To make that check, run `ots verify` on the proofs in anchors/. It needs a Bitcoin node --
+the OpenTimestamps reference client talks to one over RPC (`--bitcoin-node <url>`, or your
+local configuration) and exits without checking anything if it cannot reach one. It does not
+consult a block explorer, and neither does anything we run.
 """
 
 from __future__ import annotations
@@ -488,8 +494,135 @@ def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> 
     report.note(f"tip.json: signed by {key_id} over this exact tip, signature valid")
 
 
+# -- OpenTimestamps, enough of it to read a proof without leaving this machine ---------
+#
+# A proof is a tree: a root digest, edges that transform the message, leaves that attest
+# something about the transformed message. Reading one needs no cryptography and no network,
+# so this script reads one — what it cannot do is check the Bitcoin chain, which is `ots
+# verify`'s job and which this script says out loud it is not doing.
+
+OTS_MAGIC = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94"
+OTS_PENDING = bytes.fromhex("83dfe30d2ef90c8e")
+OTS_BITCOIN = bytes.fromhex("0588960d73d71901")
+OTS_BINARY_OPS = frozenset({0xF0, 0xF1})
+OTS_UNARY_OPS = frozenset({0x02, 0x03, 0x08, 0x67, 0xF2, 0xF3})
+OTS_MAX_DEPTH = 256
+OTS_MAX_BYTES = 1 << 20
+
+
+class OtsBroken(ValueError):
+    """These bytes are not an OpenTimestamps proof, or not all of one."""
+
+
+def read_ots(data: bytes) -> tuple[str, set[str], list[int]]:
+    """The proof's root digest, the kinds of attestation in it, and the Bitcoin heights.
+
+    Every length is checked before it is believed and every byte has to be accounted for:
+    these files come from a calendar we do not control, and trailing bytes are how a second
+    structure would ride along inside a file we publish.
+    """
+    if len(data) > OTS_MAX_BYTES:
+        raise OtsBroken(f"{len(data)} bytes is larger than any proof this record makes")
+    pos = 0
+
+    def take(count: int) -> bytes:
+        nonlocal pos
+        if pos + count > len(data):
+            raise OtsBroken(f"truncated at offset {pos}")
+        pos += count
+        return data[pos - count : pos]
+
+    def varuint() -> int:
+        value = 0
+        shift = 0
+        while True:
+            byte = take(1)[0]
+            value |= (byte & 0x7F) << shift
+            if not byte & 0x80:
+                return value
+            shift += 7
+            if shift > 63:
+                raise OtsBroken("a varuint longer than 64 bits")
+
+    def varbytes() -> bytes:
+        length = varuint()
+        if length > 4096:
+            raise OtsBroken(f"a {length}-byte string inside a proof")
+        return take(length)
+
+    if take(len(OTS_MAGIC)) != OTS_MAGIC:
+        raise OtsBroken("the magic header is not OpenTimestamps'")
+    version = varuint()
+    if version != 1:
+        raise OtsBroken(f"proof version {version}")
+    if take(1)[0] != 0x08:
+        raise OtsBroken("the file hash is not SHA-256")
+    digest = take(32)
+
+    kinds: set[str] = set()
+    heights: list[int] = []
+
+    def node(depth: int) -> None:
+        if depth > OTS_MAX_DEPTH:
+            raise OtsBroken("nested deeper than any real proof")
+        while True:
+            tag = take(1)[0]
+            more = tag == 0xFF
+            if more:
+                tag = take(1)[0]
+            if tag == 0x00:
+                attestation, payload = take(8), varbytes()
+                if attestation == OTS_BITCOIN:
+                    kinds.add("bitcoin")
+                    heights.append(_ots_varuint(payload))
+                elif attestation == OTS_PENDING:
+                    kinds.add("pending")
+                else:
+                    kinds.add(attestation.hex())
+            elif tag in OTS_BINARY_OPS:
+                varbytes()
+                node(depth + 1)
+            elif tag in OTS_UNARY_OPS:
+                node(depth + 1)
+            else:
+                raise OtsBroken(f"unknown operation 0x{tag:02x}")
+            if not more:
+                return
+
+    node(0)
+    if pos != len(data):
+        raise OtsBroken(f"{len(data) - pos} byte(s) after the end of the proof")
+    return digest.hex(), kinds, sorted(heights)
+
+
+def _ots_varuint(payload: bytes) -> int:
+    value = 0
+    shift = 0
+    for index, byte in enumerate(payload):
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            if index != len(payload) - 1:
+                raise OtsBroken("a Bitcoin attestation with bytes after its height")
+            return value
+        shift += 7
+        if shift > 63:
+            raise OtsBroken("a block height longer than 64 bits")
+    raise OtsBroken("a Bitcoin attestation with no height")
+
+
 def verify_anchors(directory: Path, report: Report) -> None:
-    """Step 10: the timestamps, as far as this script can go without Bitcoin."""
+    """Step 10: the timestamps, as far as this script can go without Bitcoin.
+
+    Four things, all offline. The anchored run has no gap in it. It reaches the publication
+    you are looking at, or is exactly one behind it. Every proof named is here, parses, and
+    is a proof of the little file beside it — whose contents are the manifest digest its row
+    claims. And a row that says "confirmed" names a proof that really carries a Bitcoin
+    attestation at the height the row states.
+
+    What is left is the part that needs the chain: whether that block really contains that
+    commitment. Run `ots verify` on the files in `anchors/`, ideally against your own node.
+    Nothing here checks it and nothing here pretends to.
+    """
     rows = read_jsonl(directory / "anchors" / "index.jsonl")
     if not rows:
         report.note(
@@ -497,30 +630,149 @@ def verify_anchors(directory: Path, report: Report) -> None:
             "sitting after the outcomes were known would still pass every check above."
         )
         return
-    manifest_path = directory / "MANIFEST.json"
-    current = (
-        hashlib.sha256(manifest_path.read_bytes()).hexdigest() if manifest_path.exists() else None
-    )
+
     seqs = sorted(int(r["publication_seq"]) for r in rows)
-    for index, seq in enumerate(seqs):
+    for previous, seq in zip(seqs, seqs[1:], strict=False):
         if not report.check(
-            seq == index,
-            f"anchors: publication {index} is missing from the index. Publication is "
+            seq == previous + 1,
+            f"anchors: publication {previous + 1} is missing from the index. Publication is "
             "unconditional, so a gap is an outage or a lie, not a quiet week.",
         ):
             break
-    latest = max(rows, key=lambda r: int(r["publication_seq"]))
-    if current:
-        report.check(
-            latest["manifest_sha256"] == current,
-            "anchors: the newest anchor stamps a manifest digest that is not this "
-            "publication's manifest",
+
+    _verify_anchor_tail(directory, rows, seqs, report)
+    _verify_anchor_proofs(directory, rows, report)
+
+
+def _verify_anchor_tail(
+    directory: Path, rows: list[dict[str, Any]], seqs: list[int], report: Report
+) -> None:
+    """The newest row against the publication in front of you.
+
+    One publication behind is the normal state and not a fault: a publication is stamped as
+    it is delivered, which is after the files you are reading were built, so its row travels
+    with the *next* publication. Two behind is a record that stopped anchoring, which is what
+    somebody would do to leave an inconvenient day unstamped.
+    """
+    ledger = read_jsonl(directory / "publications.jsonl")
+    if not ledger:
+        return
+    current = len(ledger) - 1
+    manifest_path = directory / "MANIFEST.json"
+    manifest_digest = (
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest() if manifest_path.exists() else None
+    )
+    newest = max(seqs)
+    if seqs[0] > 0:
+        report.note(
+            f"anchors: the anchored run starts at publication {seqs[0]}. Publications before "
+            "it were made before this record was anchored at all and can never be stamped: a "
+            "timestamp taken today would say today."
         )
-    confirmed = [r for r in rows if r.get("confirmed")]
+    if newest > current:
+        report.check(
+            False,
+            f"anchors: there is a row for publication {newest}, but publications.jsonl ends "
+            f"at {current}. An anchor row for a publication nobody has is evidence for a file "
+            "that is not in this record.",
+        )
+    elif newest == current:
+        row = next(r for r in rows if int(r["publication_seq"]) == current)
+        if manifest_digest is not None:
+            report.check(
+                str(row.get("manifest_sha256")) == manifest_digest,
+                f"anchors: the row for publication {current} stamps a digest that is not "
+                "this publication's MANIFEST.json",
+            )
+    elif newest == current - 1:
+        report.note(
+            f"anchors: publication {current} has no row yet. A publication is stamped as it "
+            "is delivered, so its row arrives with the next one; every publication before it "
+            "is anchored."
+        )
+    else:
+        report.check(
+            False,
+            f"anchors: publications {newest + 1} to {current} carry no anchor row, and only "
+            "the newest may. A record that stops anchoring is one that chooses which days to "
+            "timestamp.",
+        )
+
+
+def _verify_anchor_proofs(directory: Path, rows: list[dict[str, Any]], report: Report) -> None:
+    """Every row against the bytes it names, and every claim of confirmation against a proof."""
+    confirmed = 0
+    pending: list[int] = []
+    unstamped: list[int] = []
+    heights: list[int] = []
+    for row in rows:
+        seq = int(row["publication_seq"])
+        proof = row.get("proof")
+        if not proof:
+            if not report.check(
+                not row.get("anchored") and not row.get("confirmed"),
+                f"anchors: publication {seq} is marked anchored but names no proof file",
+            ):
+                continue
+            unstamped.append(seq)
+            continue
+        path = directory / str(proof)
+        if not report.check(
+            path.is_file(),
+            f"anchors: publication {seq} names {proof}, which is not in this record",
+        ):
+            continue
+        try:
+            digest, kinds, found = read_ots(path.read_bytes())
+        except (OtsBroken, OSError) as error:
+            report.check(False, f"anchors: {proof} is not a readable proof ({error})")
+            continue
+        target = directory / str(proof)[: -len(".ots")]
+        if not report.check(
+            target.is_file(),
+            f"anchors: {proof} is a proof of {target.name}, which is not in this record",
+        ):
+            continue
+        if not report.check(
+            digest == hashlib.sha256(target.read_bytes()).hexdigest(),
+            f"anchors: {proof} is a proof of bytes that are not {target.name}. A row cannot "
+            "borrow another publication's evidence.",
+        ):
+            continue
+        if not report.check(
+            target.read_text(encoding="utf-8").strip() == str(row.get("manifest_sha256")),
+            f"anchors: {target.name} holds a digest that is not the one publication {seq}'s "
+            "row names",
+        ):
+            continue
+        if row.get("confirmed"):
+            if not report.check(
+                "bitcoin" in kinds,
+                f"anchors: publication {seq} is marked confirmed, but {proof} carries no "
+                "Bitcoin attestation. Confirmed means a proof in a block, never a calendar's "
+                "promise.",
+            ):
+                continue
+            stated = row.get("block_height")
+            if not report.check(
+                stated in found,
+                f"anchors: publication {seq} claims Bitcoin block {stated}; {proof} attests "
+                f"{found}",
+            ):
+                continue
+            confirmed += 1
+            heights.extend(found)
+        else:
+            pending.append(seq)
+
     report.note(
-        f"anchors: {len(rows)} publication(s), {len(confirmed)} with a confirmed Bitcoin "
-        "proof. Run `ots verify` on the .ots files — ideally against your own node — to "
-        "check them; this script does not."
+        f"anchors: {len(rows)} publication(s) stamped, {confirmed} with a Bitcoin attestation"
+        + (f", {len(pending)} still pending" if pending else "")
+        + (f", {len(unstamped)} that no calendar answered for" if unstamped else "")
+        + (f". The earliest block attested is {min(heights)}" if heights else "")
+        + ". This script read the proofs structurally and did NOT check Bitcoin: run `ots "
+        "verify` on the files in anchors/, which needs a Bitcoin node it can reach "
+        "(`--bitcoin-node <url>`, or your local configuration) and checks nothing without one."
     )
 
 
