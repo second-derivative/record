@@ -1,14 +1,14 @@
 {
   "anchoring": {
-    "anchored": false,
-    "anchored_from_seq": null,
-    "attempted": 0,
-    "confirmed": 0,
-    "confirmed_through_seq": null,
+    "anchored": true,
+    "anchored_from_seq": 3,
+    "attempted": 1,
+    "confirmed": 1,
+    "confirmed_through_seq": 3,
     "contiguous": true,
     "failed": 0,
     "first_gap_at_seq": null,
-    "note": "The chain proves ordering. Until a proof has confirmed in a Bitcoin block it does not prove when entries were written, and this record does not claim it does.",
+    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not.",
     "pending": 0
   },
   "chain": {
@@ -16,7 +16,7 @@
     "intact": true,
     "tip": null
   },
-  "exported_at": "2026-09-20T05:00:06.915848+00:00",
+  "exported_at": "2026-09-21T05:00:28.774314+00:00",
   "recomputation": {
     "bootstrap_confidence": 0.95,
     "bootstrap_draws": 10000,
