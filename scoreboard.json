@@ -1,26 +1,39 @@
 {
+  "accounting": {
+    "resolved": 0,
+    "revealed": 0,
+    "sealed": 0,
+    "settled_true_or_false": 0,
+    "text_withheld": 0,
+    "unrevealed": 0
+  },
   "anchoring": {
     "anchored": true,
     "anchored_from_seq": 3,
-    "attempted": 1,
-    "confirmed": 1,
-    "confirmed_through_seq": 3,
+    "attempted": 2,
+    "confirmed": 2,
+    "confirmed_through_seq": 4,
     "contiguous": true,
     "failed": 0,
     "first_gap_at_seq": null,
     "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not.",
     "pending": 0
   },
+  "as_of": "2026-09-22",
   "chain": {
     "entries": 0,
     "intact": true,
     "tip": null
   },
-  "exported_at": "2026-09-21T05:00:28.774314+00:00",
+  "exported_at": "2026-09-22T05:00:19.660724+00:00",
+  "never_pooled": true,
+  "policy_versions": [],
   "recomputation": {
     "bootstrap_confidence": 0.95,
     "bootstrap_draws": 10000,
     "bootstrap_seed": 20260918,
     "instructions": "VERIFY.md"
-  }
+  },
+  "seals_by_day": {},
+  "tracks": {}
 }

@@ -37,6 +37,7 @@ consult a block explorer, and neither does anything we run.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import sys
@@ -47,6 +48,7 @@ from typing import Any
 COMMIT_DOMAIN = b"sd/record/commit/v1"
 ENTRY_DOMAIN = b"sd/record/entry/v1"
 SIGNATURE_DOMAIN = b"sd/core/actor/v1"
+REGISTRY_DOMAIN = b"sd/record/registry/v1"
 GENESIS = "genesis"
 
 
@@ -66,6 +68,29 @@ def commitment(prediction: Any, nonce_hex: str) -> str:
     return hashlib.sha256(
         COMMIT_DOMAIN + b"\x00" + canonical(prediction) + b"\x00" + bytes.fromhex(nonce_hex)
     ).hexdigest()
+
+
+def registry_leaf(entry: Any, salt_hex: str) -> str:
+    """One leaf of the quantity-registry tree: a salted digest of one entry."""
+    return hashlib.sha256(
+        REGISTRY_DOMAIN + b"\x00" + bytes.fromhex(salt_hex) + b"\x00" + canonical(entry)
+    ).hexdigest()
+
+
+def registry_root_from(proof: dict[str, Any]) -> str:
+    """Fold a quantity proof back to the root the seal published.
+
+    Twelve lines, and they are the whole of it: hash the entry with the salt, then walk up,
+    hashing each sibling on the side the step names. The leaf and the interior node are
+    tagged with different bytes, so a leaf cannot be passed off as an interior node.
+    """
+    running = registry_leaf(proof["entry"], str(proof["salt"]))
+    for step in proof.get("path", []):
+        sibling = bytes.fromhex(str(step["hash"]))
+        mine = bytes.fromhex(running)
+        pair = sibling + mine if step["side"] == "left" else mine + sibling
+        running = hashlib.sha256(REGISTRY_DOMAIN + b"\x01" + pair).hexdigest()
+    return running
 
 
 def quarter_ended_before(quarter: str, day: str) -> bool:
@@ -152,6 +177,19 @@ def verify_chain(chain: list[dict[str, Any]], report: Report) -> None:
             f"entry {index}: seq is {entry.get('seq')!r} (an entry was deleted or reordered)",
         ):
             return
+        if entry.get("kind") == "seal":
+            root = str(entry.get("registry_root", ""))
+            # Structural at the seal and checkable at the reveal. A root on its own is
+            # opaque by design -- one salted digest over the registry the claim's quantity
+            # was checked against, published before the outcome so the definition cannot be
+            # adjusted afterwards. What it must be is present and the right shape; what it
+            # means is settled by ``verify_reveals`` when the proof that opens it arrives.
+            if not report.check(
+                len(root) == 64 and all(c in "0123456789abcdef" for c in root),
+                f"entry {index}: seal carries registry_root {root or 'missing'!r}, which is "
+                "not a digest; nothing published later could be opened against it",
+            ):
+                return
         previous = stated
     report.note(f"chain: {len(chain)} entries, intact, tip {previous[:16]}…")
 
@@ -188,12 +226,18 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
                 "one of the two is wrong",
             )
             report.check(
+                "quantity_proof" not in entry,
+                f"reveal at seq {entry.get('seq')} is marked withheld and carries its "
+                "quantity proof, which names the quantity the withholding is withholding",
+            )
+            report.check(
                 entry.get("probability") is not None and entry.get("baseline") is not None,
                 f"reveal at seq {entry.get('seq')} is withheld and publishes no probability "
                 "or baseline, so its contribution to the scoreboard cannot be recomputed",
             )
             continue
         opened += 1
+        verify_quantity_proof(entry, seal, report)
         recomputed = commitment(entry.get("prediction"), str(entry.get("nonce", "")))
         report.check(
             recomputed == entry.get("commitment"),
@@ -208,6 +252,56 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
             "category and both pseudonyms, and counts in every statistic. What is withheld "
             "is the claim's wording and its nonce."
         )
+
+
+def verify_quantity_proof(entry: dict[str, Any], seal: dict[str, Any], report: Report) -> None:
+    """Step 2b: the claim's quantity existed, and meant this, on the day it was sealed.
+
+    The seal published one salted digest over the registry its quantity was checked against.
+    This opens that digest on the one entry the claim used: fold the proof back to a root and
+    compare. It proves three things at once -- the quantity was in the registry, its
+    definition digest and admissible units were what the reveal now says they were, and both
+    were fixed before the outcome was known.
+
+    What it does not hand over is the rest of the registry. The path is sibling *hashes*, the
+    definition is a digest rather than the text, and the salt only opens the leaf it came
+    with, so a reader learns exactly the entry this prediction already names and no other.
+    """
+    proof = entry.get("quantity_proof")
+    where = f"reveal at seq {entry.get('seq')}"
+    if not report.check(
+        isinstance(proof, dict),
+        f"{where} publishes its text and no quantity_proof, so the registry root its seal "
+        "committed to can never be opened",
+    ):
+        return
+    assert isinstance(proof, dict)
+    try:
+        recomputed = registry_root_from(proof)
+    except (KeyError, TypeError, ValueError) as exc:
+        report.check(False, f"{where}: the quantity proof is malformed ({exc})")
+        return
+    report.check(
+        recomputed == seal.get("registry_root"),
+        f"{where}: the quantity proof folds to {recomputed}, not to the registry root "
+        f"{seal.get('registry_root')} its seal published. The claim's quantity was not the "
+        "one the registry held when this was sealed.",
+    )
+    prediction = entry.get("prediction")
+    if isinstance(prediction, dict):
+        form = prediction.get("operational_form")
+        if isinstance(form, dict):
+            claimed = proof.get("entry", {})
+            report.check(
+                claimed.get("id") == form.get("quantity"),
+                f"{where}: the proof opens {claimed.get('id')!r} and the claim is about "
+                f"{form.get('quantity')!r}",
+            )
+            report.check(
+                form.get("unit") in (claimed.get("units") or []),
+                f"{where}: the claim's unit {form.get('unit')!r} is not one the registry "
+                f"admitted for {claimed.get('id')!r} when this was sealed",
+            )
 
 
 def verify_accounting(
@@ -236,25 +330,40 @@ def verify_accounting(
         )
 
     # The sharpest check in VERIFY.md, and it needs only chain.jsonl: name an overdue
-    # commitment yourself, by its quarter, and ask about that one line.
+    # commitment yourself, by its quarter, and ask about that one line. Per track: the
+    # charge lives inside each board, never summed across tracks, so each board answers for
+    # the seals under its own policy hash. A scoreboard with no boards charges nothing, and
+    # then no sealed commitment may be past its quarter unrevealed.
     as_of = str(scoreboard.get("as_of", ""))[:10]
-    charged = int(accounting.get("charged_as_miss", 0))
-    overdue = [
-        s
-        for s in seals
-        if s.get("commitment") not in revealed
-        and as_of
-        and quarter_ended_before(str(s.get("deadline_quarter", "")), as_of)
-    ]
-    report.check(
-        len(overdue) <= charged,
-        f"{len(overdue)} sealed prediction(s) are past their deadline quarter with no "
-        f"reveal, but the scoreboard charges only {charged} as a miss. Every sealed "
-        "commitment must resolve publicly.",
-    )
+    boards = scoreboard.get("tracks") or {}
+    if not boards and scoreboard.get("headline") is not None:
+        boards = {str(scoreboard.get("policy_version")): scoreboard}
+    if not boards:
+        boards = {"(no board)": {"accounting": {}, "policy_hash": None}}
+    overdue_total = charged_total = 0
+    for version, board in sorted(boards.items()):
+        digest = board.get("policy_hash")
+        charged = int((board.get("accounting") or {}).get("charged_as_miss", 0))
+        overdue = [
+            s
+            for s in seals
+            if s.get("commitment") not in revealed
+            and (digest is None or s.get("policy_hash") == digest)
+            and as_of
+            and quarter_ended_before(str(s.get("deadline_quarter", "")), as_of)
+        ]
+        report.check(
+            len(overdue) <= charged,
+            f"{len(overdue)} sealed prediction(s) under the {version} board are past their "
+            f"deadline quarter with no reveal, but that board charges only {charged} as a "
+            "miss. Every sealed commitment must resolve publicly.",
+        )
+        overdue_total += len(overdue)
+        charged_total += charged
     report.note(
-        f"accounting: {len(seals)} sealed, {len(reveals)} revealed, "
-        f"{len(overdue)} past their deadline quarter and unrevealed, {charged} charged as a miss"
+        f"accounting: {len(seals)} sealed, {len(reveals)} revealed, {overdue_total} past "
+        f"their deadline quarter and unrevealed, {charged_total} charged as a miss across "
+        f"{len(boards)} board(s), each charged inside its own track"
     )
 
 
@@ -272,23 +381,56 @@ def verify_sample_size(
     groups = {
         e["correlation_group_pseudonym"] for e in chain if e.get("correlation_group_pseudonym")
     }
-    headline = scoreboard.get("headline") or {}
-    for name, seen, claimed in (
-        ("clusters", clusters, headline.get("clusters")),
-        ("correlation groups", groups, headline.get("correlation_groups")),
-    ):
-        if claimed is None or not seen:
-            continue
-        report.check(
-            int(claimed) <= len(seen),
-            f"the scoreboard resamples over {claimed} {name}; the chain contains only "
-            f"{len(seen)} distinct. A larger count is a larger effective sample size than "
-            "the record supports.",
+    # One board per track since the fast track, each checked against the reveals sealed
+    # under its own policy hash; a scoreboard from before that has one board at the top.
+    boards = scoreboard.get("tracks") or {}
+    if not boards and scoreboard.get("headline") is not None:
+        boards = {str(scoreboard.get("policy_version")): scoreboard}
+    for version, board in sorted(boards.items()):
+        headline = board.get("headline") or {}
+        digest = board.get("policy_hash")
+        reveals = [
+            e
+            for e in chain
+            if e.get("kind") == "reveal" and (digest is None or e.get("policy_hash") == digest)
+        ]
+        track_clusters = {e["cluster_pseudonym"] for e in reveals if e.get("cluster_pseudonym")}
+        unit = board.get("resampling_unit") or {}
+        block_days = unit.get("block_days")
+        blocks: set[Any] = set()
+        for e in reveals:
+            pseudonym = e.get("correlation_group_pseudonym")
+            if not pseudonym:
+                continue
+            if block_days and e.get("resolution_date"):
+                blocks.add((pseudonym, day_ordinal(e["resolution_date"]) // int(block_days)))
+            elif not block_days:
+                blocks.add(pseudonym)
+        track_groups = blocks
+        unit_name = (
+            f"correlation group x {block_days}-day block" if block_days else "correlation groups"
         )
+        for name, seen, claimed in (
+            ("clusters", track_clusters, headline.get("clusters")),
+            (unit_name, track_groups, headline.get("correlation_groups")),
+        ):
+            if claimed is None or not seen:
+                continue
+            report.check(
+                int(claimed) <= len(seen),
+                f"the scoreboard's {version} board resamples over {claimed} {name}; the chain "
+                f"contains only {len(seen)} distinct. A larger count is a larger effective "
+                "sample size than the record supports.",
+            )
     report.note(
         f"sample size: {len(clusters)} distinct cluster(s) and {len(groups)} correlation "
         f"group(s) in the chain"
     )
+
+
+def day_ordinal(text: Any) -> int:
+    """A ``YYYY-MM-DD`` string as a proleptic-Gregorian ordinal, as the scorer computes it."""
+    return dt.date.fromisoformat(str(text)[:10]).toordinal()
 
 
 def verify_scores(chain: list[dict[str, Any]], report: Report) -> None:
@@ -361,6 +503,40 @@ def verify_policies(chain: list[dict[str, Any]], report: Report) -> None:
             break
     if hashes:
         report.note(f"policies: {len(hashes)} version(s) — {', '.join(sorted(hashes))}")
+
+
+def verify_tracks(chain: list[dict[str, Any]], scoreboard: dict[str, Any], report: Report) -> None:
+    """Step 6b: every board names a registered policy, and nothing pools two of them.
+
+    A board keyed by a version whose hash the chain never registered is a statistic under
+    rules nobody can read. And the top level may carry counts over the whole chain but no
+    statistic: a headline, a calibration or a power block outside ``tracks`` would be a
+    number over rows sealed under different floors, which is the pooling the design forbids.
+    """
+    boards = scoreboard.get("tracks")
+    if not isinstance(boards, dict):
+        return
+    registered = {str(e["policy_hash"]) for e in chain if e.get("kind") == "policy"}
+    for version, board in sorted(boards.items()):
+        digest = board.get("policy_hash")
+        report.check(
+            bool(digest) and (not registered or str(digest) in registered),
+            f"the scoreboard's {version} board names policy {digest!r}, which this chain "
+            "never registered. Its statistics are under rules nobody can read.",
+        )
+        report.check(
+            str(board.get("policy_version")) == str(version),
+            f"the board keyed {version!r} says it is {board.get('policy_version')!r}",
+        )
+    pooled = {"headline", "by_tier", "by_batch", "calibration", "power", "improvement"} & set(
+        scoreboard
+    )
+    report.check(
+        not pooled,
+        f"the scoreboard carries {sorted(pooled)} outside `tracks`; a statistic over rows "
+        "sealed under different policies pools tracks the record says are never pooled",
+    )
+    report.note(f"tracks: {len(boards)} board(s) — {', '.join(sorted(boards))}; none pooled")
 
 
 def verify_publications(directory: Path, chain: list[dict[str, Any]], report: Report) -> None:
@@ -798,6 +974,7 @@ def main(argv: list[str]) -> int:
         verify_sample_size(chain, scoreboard, report)
         verify_scores(chain, report)
         verify_policies(chain, report)
+        verify_tracks(chain, scoreboard, report)
         verify_publications(directory, chain, report)
     verify_manifest(directory, report)
     verify_tip(directory, chain, report)

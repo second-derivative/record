@@ -66,6 +66,41 @@ but check the commitment rather than trusting the pointer.
 The nonce is why a commitment cannot be brute-forced: without it, anyone could grid over
 plausible claims, hash each one, and read every unopened prediction straight off this file.
 
+## Check that the claim's quantity meant this when it was sealed
+
+A prediction is about a named quantity — "advanced packaging capacity", in some unit — and
+what that name *means* is a definition we hold and do not publish. A record
+that published the claim and kept the meaning adjustable would be a record you cannot check:
+we could decide after the fact that the quantity had always meant something the outcome
+suited.
+
+So every `seal` entry carries a `registry_root`: one digest over the whole registry of
+quantities its claim was checked against, salted with a value fresh to that seal. On its own
+it says nothing, which is the point — it names no quantity, no count and no definition, and
+two seals made under one registry do not share a value.
+
+Every `reveal` that publishes its text carries `quantity_proof`, which opens that digest on
+the one entry the claim used: the entry itself (`id`, its dimension family, the unit ids it
+admitted, and a digest of its definition), the seal's `salt`, and a `path` of sibling
+hashes. Fold it back:
+
+    leaf = sha256(b"sd/record/registry/v1" + b"\x00" + bytes.fromhex(salt) + b"\x00" + canonical_json(entry)).hexdigest()
+
+then for each step in `path`, with `h` the running value,
+
+    h = sha256(b"sd/record/registry/v1" + b"\x01" + (sibling + h if side == "left" else h + sibling)).hexdigest()
+
+over the raw 32 bytes of each digest. The result must equal the `registry_root` on the seal
+this reveal names, the entry's `id` must be the claim's `quantity`, and the claim's `unit`
+must be one of the entry's `units`. If all three hold, that quantity existed and meant
+exactly this on the day the prediction was sealed.
+
+What you do not get is the rest of the registry. The path is sibling hashes, the definition
+is a digest rather than its text, and the salt opens only the leaf it came with, so a proof
+tells you about the quantity the reveal already names and about no other. A reveal with its
+text withheld carries no proof either, because the proof would name what the withholding is
+withholding.
+
 ## Check that we did not hide our misses
 
 **Name an overdue commitment yourself.** This is the sharpest check in this file and it needs
@@ -88,6 +123,35 @@ nonce costs us more than revealing whatever it hid.
 `scoreboard.json` also carries `worst_case`, in which every void and every overdue
 prediction is charged as maximally wrong. If the headline only survives when those are
 excluded, you will see it in the same file.
+
+## Tracks: one board per policy, never pooled
+
+A record may seal under more than one registered policy. Each `policy` entry in `chain.jsonl`
+is one set of rules — its thresholds, and for a track its `track` block — and every `seal`
+and `reveal` names the `policy_hash` it was made under. That hash, and the policy version a
+`reveal` and a board carry with it, are the only markers of which track an entry is in; there
+is no separate field and no track name anywhere in this record.
+
+`scoreboard.json` therefore has one board per policy under `tracks`, keyed by policy version,
+each carrying its own `policy_hash`, `accounting`, `headline`, `by_tier`, `by_batch`,
+`calibration` and `power`. The counts at the top level (`accounting`, `seals_by_day`) are over
+the whole chain, because the chain does not partition; they are entry counts about the chain
+and never about skill, which is why `charged_as_miss` and `scorable` sit inside each track's
+`accounting` and are never summed. Every *statistic* is inside a track.
+**No number anywhere combines two tracks.** A skill number pooled across a policy with a
+42-day minimum horizon and one with a one-day minimum would report the first's independence
+over the second's rows. If you find such a number, this record is wrong.
+
+Each track publishes `resampling_unit`, which says what its `correlation_groups` count is
+counting. A unit of `correlation_group` means the correlation group pseudonym. A unit of
+`correlation_group_by_resolution_block` with a `block_days` of N means the pair of that
+pseudonym and `resolution_date.toordinal() // N`, both of which every reveal publishes, so you
+can recount the blocks from `reveals.jsonl`. That blocking is an assumption, stated in the
+track's `assumptions` in words, and it is never applied to a policy whose `track` block does
+not carry `resampling_block_days`.
+
+A track's `batch_id` is the seal quarter (`2026Q3`) or the seal month (`2026M09`), as its
+policy's `track.batch_grain` says; the two spellings never collide.
 
 ## Check a publication, where `tip.json` is present
 
