@@ -512,6 +512,8 @@ def verify_tracks(chain: list[dict[str, Any]], scoreboard: dict[str, Any], repor
     rules nobody can read. And the top level may carry counts over the whole chain but no
     statistic: a headline, a calibration or a power block outside ``tracks`` would be a
     number over rows sealed under different floors, which is the pooling the design forbids.
+    The converse holds for anchoring: it is a fact about the whole record, stated once at the
+    top level, and a board carrying its own could say the opposite of the record's.
     """
     boards = scoreboard.get("tracks")
     if not isinstance(boards, dict):
@@ -527,6 +529,12 @@ def verify_tracks(chain: list[dict[str, Any]], scoreboard: dict[str, Any], repor
         report.check(
             str(board.get("policy_version")) == str(version),
             f"the board keyed {version!r} says it is {board.get('policy_version')!r}",
+        )
+        report.check(
+            "anchoring" not in board,
+            f"the scoreboard's {version} board carries its own `anchoring`. Anchoring is "
+            "stated once, at the top level, for the whole record; a track's copy can only "
+            "repeat it or contradict it.",
         )
     pooled = {"headline", "by_tier", "by_batch", "calibration", "power", "improvement"} & set(
         scoreboard

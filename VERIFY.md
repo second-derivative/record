@@ -134,7 +134,8 @@ is no separate field and no track name anywhere in this record.
 
 `scoreboard.json` therefore has one board per policy under `tracks`, keyed by policy version,
 each carrying its own `policy_hash`, `accounting`, `headline`, `by_tier`, `by_batch`,
-`calibration` and `power`. The counts at the top level (`accounting`, `seals_by_day`) are over
+`calibration` and `power`, and no `anchoring` block: that is stated once, at the top level,
+for the whole record. The counts at the top level (`accounting`, `seals_by_day`) are over
 the whole chain, because the chain does not partition; they are entry counts about the chain
 and never about skill, which is why `charged_as_miss` and `scorable` sit inside each track's
 `accounting` and are never summed. Every *statistic* is inside a track.
@@ -233,6 +234,11 @@ It does not, on its own, prove **when** entries were written — a chain built i
 after the outcomes were known would still verify. That requires the anchoring proofs above.
 Where `scoreboard.json` reports `anchoring.anchored` as false, this record proves ordering
 only, and says so rather than implying more.
+
+Anchoring is a property of the whole record, not of a track. It is stated once, in the
+`anchoring` block at the top level of `scoreboard.json`, and no board under `tracks` carries
+one: a track's rows are timestamped by the same chain and the same anchors as every other
+row. `verify.py` fails a board that carries its own.
 
 A publication is stamped as it is delivered, which is after the files you are reading were
 built, so the newest publication's row travels with the *next* publication. One behind is
