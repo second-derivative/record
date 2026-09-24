@@ -9,8 +9,9 @@ Each line of `chain.jsonl` is one entry. Each carries `prev_hash`, the previous 
 the next line's `prev_hash`. Hiding an edit means rewriting every entry after it, and the
 anchoring proofs below are what stop that.
 
-A `seal` entry says a prediction was committed to on a stated day. It carries two
-commitments — one to the prediction, one to material that is never opened — a cluster
+A `seal` entry says a prediction was committed to on a stated day. It carries three
+commitments — one to the prediction, one to its three numbers on their own
+(`numbers_commitment`), one to material that is never opened — a cluster
 pseudonym, the day, the quarter the prediction comes due, and the hash of the policy it was
 sealed under. It carries nothing about the claim, not even its category: a prediction can
 stay sealed for a year, and a few hundred categories and resolution dates would describe
@@ -22,9 +23,13 @@ settled it, and the category, tier and dates the seal entry withheld.
 A reveal marked `"withheld": true` is the one exception, and it is a narrow one. Where the
 claim's own wording cannot be published, the text and its nonce stay unpublished — but the
 outcome, the category, the tier, the dates and the cluster are published exactly as usual,
-and the prediction is counted in every statistic on the scoreboard. Withholding removes the
-words; it never removes a result. The count of withheld reveals is published under
-`accounting.text_withheld`, so you can see how often it is used.
+and so are the probability, the market's baseline and `baseline_visible_to_forecaster`
+(whether the market's number was shown before the prediction was made), so the prediction is
+counted in every statistic on the scoreboard and you can count it yourself. Those three
+numbers are the ones sealed: every reveal, withheld or not, opens the seal's
+`numbers_commitment` (below). Withholding removes the words; it never removes a result. The
+count of withheld reveals is published under `accounting.text_withheld`, so you can see how
+often it is used.
 
 Two things are deliberately **not** in this file. Entries carry an `actor_digest` in place
 of a signature: the digest tells you which entries share a signer and nothing else, and a
@@ -65,6 +70,42 @@ but check the commitment rather than trusting the pointer.
 
 The nonce is why a commitment cannot be brute-forced: without it, anyone could grid over
 plausible claims, hash each one, and read every unopened prediction straight off this file.
+
+## Check a reveal's numbers against what was sealed
+
+Every score and count on the scoreboard is computed from three values per prediction: its
+`probability`, its `baseline` and `baseline_visible_to_forecaster`. Each `seal` entry
+commits to those three on their own, under a nonce of their own, and every `reveal` entry
+publishes that nonce as `numbers_nonce`. Take the three values — from the reveal's top level
+when it is withheld, from its `prediction` when it is open — exactly as the file spells them:
+
+    numbers = {
+        "probability": ...,
+        "baseline": ...,
+        "baseline_visible_to_forecaster": ...,
+    }
+    numbers_commitment == sha256(
+        b"sd/record/numbers/v1" + b"\x00"
+        + canonical_json(numbers) + b"\x00"
+        + bytes.fromhex(numbers_nonce)
+    ).hexdigest()
+
+where `numbers_commitment` is the one on the seal entry the reveal names. Numbers travel as
+exact decimal strings, never as JSON floats: `"0.62"` and `"0.620"` are the same number and not
+the same commitment, and the sealed spelling is the only one that opens it.
+
+On a withheld reveal this is the only thing that ties its published numbers to the day it was
+sealed; without it they could have been written after the outcome was known. On an open
+reveal the prediction's own commitment already covers them, and this checks that the seal's two
+commitments agree. `numbers_nonce` opens nothing else: it is independent of the nonce that
+blinds the text, so a withheld reveal's words stay as closed as before. `verify.py` fails a seal
+with no `numbers_commitment`, a reveal with no `numbers_nonce`, and any reveal whose numbers do
+not open it.
+
+The domain tag is its own, not the prediction's, so a digest made for one commitment can never
+stand for the other. And a seal is opened once: `verify.py` fails a second reveal naming a seal
+another reveal already opened, which could otherwise borrow that seal's numbers and nonce whole,
+and a reveal whose `cluster_pseudonym` is not its seal's.
 
 ## Check that the claim's quantity meant this when it was sealed
 
@@ -124,6 +165,53 @@ nonce costs us more than revealing whatever it hid.
 prediction is charged as maximally wrong. If the headline only survives when those are
 excluded, you will see it in the same file.
 
+## Check what review removed before anything was sealed
+
+Every forecast is read by the firm's owner before it can be sealed. The owner releases a batch
+whole, or discards a forecast for a named defect, and never for its probability. So that a
+reader can see what was removed, each decided batch is one `review` entry in `chain.jsonl`:
+
+- `batch`: the batch number; batches run 1, 2, 3 in the order they were decided, with no gap.
+- `decided_on`: the day the batch was decided.
+- `held`: how many forecasts the batch held.
+- `released`: how many were released to be sealed.
+- `discarded`: how many were discarded, by defect: `question` (the question was malformed or
+  could not be resolved as written), `data` (a number read or computed was wrong), `duplicate`,
+  and `program` (a fault in the code that produced the batch, only ever for a whole batch).
+- `batch_discarded_as`: the defect named when the whole batch was discarded at once, or null.
+- `lapsed`: how many could no longer be sealed in time when the batch was released.
+- `batch_fingerprint`: a salted sha256 over every forecast in the batch and what happened to it.
+
+An `awaiting_review` entry says how many forecasts were held and not yet decided:
+
+- `on`: the day of the count.
+- `held_ever`: how many forecasts had been held for review since the record began.
+- `waiting`: how many forecasts were held and undecided.
+- `oldest_waiting_days`: how many days the oldest of them had waited.
+- `batches_decided`: the last batch decided before the count was taken.
+
+Check, in chain order:
+
+1. `held` equals `released` plus every `discarded` count plus `lapsed`.
+2. A batch counting any `program` discard has `batch_discarded_as` of `program`; a batch
+   discarded whole released nothing and lapsed nothing.
+3. Batch numbers run 1, 2, 3 with no gap, and `decided_on` never goes backwards.
+4. Each `awaiting_review` entry's `batches_decided` is the number of `review` entries before it.
+5. Each `awaiting_review` entry's `waiting` is exactly its `held_ever` minus the `held` of every
+   `review` entry before it, and `held_ever` and `on` never fall from one to the next. A forecast
+   leaves the waiting count by being decided in a batch you can see, or not at all.
+6. `scoreboard.json`'s `review` block is the sum of these entries, with `waiting` copied from
+   the newest `awaiting_review` entry, and no track's board carries one.
+
+What you cannot check from these files is that every forecast was counted; the count is the
+owner's own statement, fixed on the chain on the day it was made. The fingerprint is what makes
+it auditable later: given a batch's salt and its forecasts, an auditor recomputes
+
+    sha256(b"sd/record/review/v1" + b"\x00" + salt + b"\x00" + canonical_json(rows))
+
+where `rows` is one `[sha256(canonical_json(forecast)), disposition, defect or ""]` per
+forecast, sorted (`review_fingerprint` in `verify.py`). The salts are never published here.
+
 ## Tracks: one board per policy, never pooled
 
 A record may seal under more than one registered policy. Each `policy` entry in `chain.jsonl`
@@ -154,6 +242,42 @@ not carry `resampling_block_days`.
 A track's `batch_id` is the seal quarter (`2026Q3`) or the seal month (`2026M09`), as its
 policy's `track.batch_grain` says; the two spellings never collide.
 
+## Recompute the smallest market error the record could detect
+
+Each board's `power.detectable_market_error` is arithmetic on a count you can make yourself:
+
+    D = sqrt( (z(1 - alpha/2) + z(power))^2 * 4 * q * (1 - q) / n ),  q = 0.5
+
+`z` is the standard normal quantile (`statistics.NormalDist().inv_cdf` in Python), `alpha` and
+`power` are the `thresholds` on the `policy` entry whose `policy_hash` the board names, and `n`
+is `power.correlation_groups`, which must equal `headline.correlation_groups`. Round `D` to four
+places. At alpha 0.05 and 80% power, 87 groups give 0.3004 and 150 give 0.2287.
+
+It is what predictions equal to the true probabilities could detect across `n` resampling
+units if the market were off by `D` on every one of them. Our own forecast errors, and a market
+wrong on only some groups, both make the real figure larger. The board says so in its
+`assumptions`.
+
+The key is **absent** until `D` is at most 0.5, the largest error a market can make at a 50%
+base rate: 32 groups at the thresholds above. Absent means "too few groups", never "not
+computed", so check both directions: a board or stage carrying the key must carry the formula's
+value at its own `correlation_groups`, and one leaving it out must count fewer than 32.
+
+To recount `n`, take the `reveal` entries under the board's `policy_hash` with `outcome` TRUE or
+FALSE, `baseline_tier` `A_traded` or `B_prediction_market`, `contamination_risk` false, and a
+baseline probability inside the policy's `trivial_band`, and count their distinct resampling
+units (see "Tracks" above). The headline also leaves out the arm that saw the market's number,
+which an open reveal states in `prediction.baseline_visible_to_forecaster` and a withheld one
+in its own top-level `baseline_visible_to_forecaster`. A withheld reveal must state it, as
+`true` or `false`; an open one must not state it a second time outside its prediction, where
+the commitment does not cover it. So every count is a count, never a range.
+
+Every count is checked, not only the headline's. Each stage's `correlation_groups` (the power
+block, the headline, each tier, each batch, the visible arm) must be an integer, never `150.0`
+or `true`, and must equal the count of that stage's units in the reveals. A
+stage that states a figure must state the count it was computed on, and a board with reveals
+under its policy must have a power block.
+
 ## Check a publication, where `tip.json` is present
 
 This is the one check that needs something beyond the Python standard library: Ed25519
@@ -174,7 +298,8 @@ tell a broken record from a broken machine:
     1   a check FAILED — something about this record does not hold
     2   a check could not be MADE on this machine; nothing failed
 
-Only exit 1 is a statement about the record.
+Only exit 1 is a statement about the record. `verify.py` needs Python 3.10 or newer; on an
+older one it exits 2 before checking anything and says so.
 
 `tip.json` carries the chain's tip digest, the number of entries it covers, the day it was
 exported, the signing envelope under `actor`, and under `public_keys` the public half of the
@@ -241,8 +366,10 @@ one: a track's rows are timestamped by the same chain and the same anchors as ev
 row. `verify.py` fails a board that carries its own.
 
 A publication is stamped as it is delivered, which is after the files you are reading were
-built, so the newest publication's row travels with the *next* publication. One behind is
-the normal state; two behind is a record that stopped anchoring, and `verify.py` fails on it.
+built. `anchors/` is outside `MANIFEST.json`, so that row is committed with this publication
+and you are looking at it — but `scoreboard.json` was written before it existed and cannot
+count it. A row missing for the newest publication is the other legal state and not a fault;
+two behind is a record that stopped anchoring, and `verify.py` fails on it.
 
 The counts under `anchoring` are counts of **anchor attempts**, one per publication that has
 been stamped, and they are not the count of publications: that is the length of
@@ -251,6 +378,27 @@ and it splits exactly into `confirmed` (a proof in a Bitcoin block), `pending` (
 not yet in a block) and `failed` (the calendar could not be reached, recorded rather than
 retried into silence). A publication with no row at all is counted in none of them, and
 `contiguous` is false with `first_gap_at_seq` naming the first one missing.
+
+`excludes_publication_seq` names the one publication those counts leave out, which is this
+one. Its row stamps the digest of the `MANIFEST.json` that covers `scoreboard.json`, so a
+count inside that file cannot include the row that names it — there is no order in which it
+could, and the same acyclicity is why `anchors/` is outside the manifest at all. In a record
+you fetched, that row is in `anchors/index.jsonl` beside it. The check is:
+
+    attempted  ==  the number of rows in anchors/index.jsonl whose publication_seq
+                   is not excludes_publication_seq
+
+When `excludes_publication_seq` is null, that is every row. It names the newest publication in
+`publications.jsonl` or nothing: a scoreboard that leaves out any older publication's row is
+not describing its own record. `verify.py` makes both checks for you.
+
+It does not check `confirmed` the same way, and that is deliberate: a row goes from pending
+to confirmed hours after the publication carrying it was built, so `confirmed` in an older
+`scoreboard.json` can be behind the index — understating the evidence this record holds,
+never overstating it. Publications 0 to 4 carry no
+`excludes_publication_seq` at all; they were published before the field existed. In 0 and 2
+that changes nothing, because no publication had been stamped yet and their indexes are empty.
+In 3 and 4, `attempted` is one behind the rows beside it for the reason above.
 
 `anchored_from_seq` names the first publication that has a row. It is not zero on this
 record and never will be: the first publications were made before this record was anchored

@@ -32,11 +32,12 @@ It is published so that the claim can be checked by someone who assumes we are l
 python3 -I verify.py .
 ```
 
-Exit 0 means every check in `VERIFY.md` passed on these files. Exit 1 names the first one that
+It needs Python 3.10 or newer. Exit 0 means every check in `VERIFY.md` passed on these files. Exit 1 names the first one that
 failed, and is the only exit that says anything against this record. Exit 2 means a check could
 not be made on your machine and names it: checking the signature on `tip.json` needs
 `cryptography`, the only thing any of this needs beyond the standard library, and a run that
-could not make that check says so rather than reporting a pass it did not make. `VERIFY.md` has
+could not make that check says so rather than reporting a pass it did not make. An older
+Python exits 2 too, before checking anything. `VERIFY.md` has
 the install command and the exit codes, normatively.
 
 `VERIFY.md` is normative and `verify.py` is a convenience. Where the two disagree, `VERIFY.md` is

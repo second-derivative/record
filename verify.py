@@ -3,6 +3,9 @@
 
     python3 verify.py [directory]
 
+It needs Python 3.10 or newer. An older Python exits 2 before checking anything, because
+exit 1 is an accusation against the record and a reader's Python is not the record's fault.
+
 Three exit codes, so a script can tell them apart:
 
     0   every check in VERIFY.md passed on these files
@@ -40,16 +43,53 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
+#: The oldest Python this runs on: `zip(..., strict=)` and an `int | None` isinstance are 3.10.
+MINIMUM_PYTHON = (3, 10)
+
+if sys.version_info < MINIMUM_PYTHON:
+    # Checked before anything else runs. Left to fail on its own, an older Python raised a
+    # TypeError halfway through step 10 and exited 1 -- the one exit that says something
+    # against the record -- over the reader's interpreter. The file stays parseable by 3.8
+    # so this line is reached at all.
+    print(
+        f"INCOMPLETE: this script needs Python {MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]} or newer "
+        f"and this is {sys.version.split()[0]}; nothing was checked and nothing failed."
+    )
+    raise SystemExit(2)
+
 COMMIT_DOMAIN = b"sd/record/commit/v1"
+NUMBERS_DOMAIN = b"sd/record/numbers/v1"
 ENTRY_DOMAIN = b"sd/record/entry/v1"
 SIGNATURE_DOMAIN = b"sd/core/actor/v1"
 REGISTRY_DOMAIN = b"sd/record/registry/v1"
+REVIEW_DOMAIN = b"sd/record/review/v1"
 GENESIS = "genesis"
+
+REVIEW_CLASSES = ("question", "data", "duplicate", "program")
+WHOLE_BATCH_ONLY = ("program",)
+REVIEW_FIELDS = frozenset(
+    {
+        "batch",
+        "decided_on",
+        "held",
+        "released",
+        "discarded",
+        "batch_discarded_as",
+        "lapsed",
+        "batch_fingerprint",
+    }
+)
+AWAITING_FIELDS = frozenset(
+    {"on", "held_ever", "waiting", "oldest_waiting_days", "batches_decided"}
+)
+ENTRY_FRAME = frozenset({"kind", "seq", "prev_hash", "entry_hash", "actor_digest"})
 
 
 def canonical(value: Any) -> bytes:
@@ -64,9 +104,20 @@ def entry_hash(entry: dict[str, Any]) -> str:
     return hashlib.sha256(ENTRY_DOMAIN + b"\x00" + canonical(body)).hexdigest()
 
 
-def commitment(prediction: Any, nonce_hex: str) -> str:
+NUMBERS_FIELDS = ("probability", "baseline", "baseline_visible_to_forecaster")
+"""What a seal's ``numbers_commitment`` covers, in the payload ``{field: value}``."""
+
+
+def is_digest(value: Any) -> bool:
+    """64 lowercase hex characters: a SHA-256 digest, or a 32-byte nonce."""
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def commitment(prediction: Any, nonce_hex: str, domain: bytes = COMMIT_DOMAIN) -> str:
     return hashlib.sha256(
-        COMMIT_DOMAIN + b"\x00" + canonical(prediction) + b"\x00" + bytes.fromhex(nonce_hex)
+        domain + b"\x00" + canonical(prediction) + b"\x00" + bytes.fromhex(nonce_hex)
     ).hexdigest()
 
 
@@ -93,6 +144,17 @@ def registry_root_from(proof: dict[str, Any]) -> str:
     return running
 
 
+def review_fingerprint(salt_hex: str, rows: list[list[str]]) -> str:
+    """The batch fingerprint, for an auditor handed a batch's salt and its forecasts.
+
+    ``rows`` is one ``[sha256(canonical(forecast)), disposition, class]`` per forecast, the
+    class empty unless the disposition is ``discarded``, sorted. Not run by :func:`main`: the
+    salt is never published, and opening a fingerprint is an audit, not a public check."""
+    return hashlib.sha256(
+        REVIEW_DOMAIN + b"\x00" + bytes.fromhex(salt_hex) + b"\x00" + canonical(sorted(rows))
+    ).hexdigest()
+
+
 def quarter_ended_before(quarter: str, day: str) -> bool:
     """Has ``2027Q2`` finished by ``2027-07-01``? Seal entries date deadlines by quarter."""
     try:
@@ -116,7 +178,26 @@ def number(value: Any) -> Decimal | None:
         return None
 
 
+class _RepeatedKey(ValueError):
+    pass
+
+
+def _no_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A JSON object whose keys are all different. ``json`` keeps the last of two silently."""
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _RepeatedKey(f"the key {key!r} appears twice in one object")
+        seen[key] = value
+    return seen
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Every line of a JSONL file, each an object with no key given twice.
+
+    Two copies of one key would let a line say two things, and a reader would see whichever
+    their JSON library kept. Refused, so every reader reads the same line.
+    """
     rows: list[dict[str, Any]] = []
     if not path.exists():
         return rows
@@ -125,10 +206,24 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
         if not text:
             continue
         try:
-            rows.append(json.loads(text))
+            rows.append(json.loads(text, object_pairs_hook=_no_repeated_keys))
         except json.JSONDecodeError as error:
             raise SystemExit(f"FAIL {path.name}:{lineno} is not valid JSON ({error})") from None
+        except _RepeatedKey as error:
+            raise SystemExit(f"FAIL {path.name}:{lineno} is not one reading: {error}") from None
     return rows
+
+
+def read_json(path: Path) -> Any:
+    """One JSON file, with no key given twice in any object, as :func:`read_jsonl` reads a
+    line. A scoreboard saying ``"correlation_groups": 99, "correlation_groups": 36`` is two
+    boards at once, and which one a reader sees would depend on their library."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_repeated_keys)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"FAIL {path.name} is not valid JSON ({error})") from None
+    except _RepeatedKey as error:
+        raise SystemExit(f"FAIL {path.name} is not one reading: {error}") from None
 
 
 class Report:
@@ -190,6 +285,12 @@ def verify_chain(chain: list[dict[str, Any]], report: Report) -> None:
                 "not a digest; nothing published later could be opened against it",
             ):
                 return
+            report.check(
+                is_digest(entry.get("numbers_commitment")),
+                f"entry {index}: seal carries numbers_commitment "
+                f"{entry.get('numbers_commitment', 'missing')!r}, which is not a digest; the "
+                "probability, baseline and arm its reveal publishes could not be held to it",
+            )
         previous = stated
     report.note(f"chain: {len(chain)} entries, intact, tip {previous[:16]}…")
 
@@ -198,6 +299,7 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
     """Step 2: every opened prediction is the one committed to, months earlier."""
     seals = {int(e["seq"]): e for e in chain if e.get("kind") == "seal"}
     opened = withheld = 0
+    revealed: dict[int, Any] = {}
     for entry in chain:
         if entry.get("kind") != "reveal":
             continue
@@ -209,6 +311,21 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
         ):
             continue
         assert seal is not None
+        # A seal is opened once. A second reveal naming the same seal could borrow its
+        # commitment, its numbers and its nonce, and check out on every other line here.
+        seal_seq = int(entry["seal_seq"])
+        report.check(
+            seal_seq not in revealed,
+            f"reveal at seq {entry.get('seq')} opens seal {seal_seq}, which the reveal at seq "
+            f"{revealed.get(seal_seq)} already opened; a seal is opened once",
+        )
+        revealed.setdefault(seal_seq, entry.get("seq"))
+        report.check(
+            entry.get("cluster_pseudonym") == seal.get("cluster_pseudonym"),
+            f"reveal at seq {entry.get('seq')} is in cluster {entry.get('cluster_pseudonym')!r} "
+            f"and the seal it names in {seal.get('cluster_pseudonym')!r}; one of the two is "
+            "not this prediction's",
+        )
         report.check(
             entry.get("commitment") == seal.get("commitment"),
             f"reveal at seq {entry.get('seq')}: commitment does not match the seal it names. "
@@ -218,6 +335,26 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
             str(seal.get("sealed_on", "")) <= str(entry.get("resolved_on", "")),
             f"reveal at seq {entry.get('seq')}: resolved before it was sealed",
         )
+        # The numbers every score is computed from, opened against the seal's own commitment
+        # to them. On a withheld reveal this is the only thing that binds them to the seal;
+        # on an open one it checks the seal's two commitments agree.
+        source = entry if entry.get("withheld") else (entry.get("prediction") or {})
+        numbers_nonce = entry.get("numbers_nonce")
+        if report.check(
+            is_digest(numbers_nonce),
+            f"reveal at seq {entry.get('seq')} gives its numbers_nonce as "
+            f"{entry.get('numbers_nonce', 'nothing')!r}; without it the probability, baseline "
+            "and arm it publishes cannot be checked against its seal",
+        ):
+            numbers = {field: source.get(field) for field in NUMBERS_FIELDS}
+            opened_numbers = commitment(numbers, str(numbers_nonce), NUMBERS_DOMAIN)
+            report.check(
+                opened_numbers == seal.get("numbers_commitment"),
+                f"reveal at seq {entry.get('seq')}: its probability, baseline and arm with its "
+                f"numbers_nonce hash to {opened_numbers}, not to the numbers_commitment its seal "
+                f"published, {seal.get('numbers_commitment')}. The numbers it is scored on are "
+                "not the ones sealed.",
+            )
         if entry.get("withheld"):
             withheld += 1
             report.check(
@@ -235,7 +372,21 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
                 f"reveal at seq {entry.get('seq')} is withheld and publishes no probability "
                 "or baseline, so its contribution to the scoreboard cannot be recomputed",
             )
+            report.check(
+                type(entry.get("baseline_visible_to_forecaster")) is bool,
+                f"reveal at seq {entry.get('seq')} is withheld and gives which arm it was in "
+                f"as {entry.get('baseline_visible_to_forecaster', 'nothing')!r}; it must say "
+                "true or false, or no stage of the scoreboard can be counted",
+            )
             continue
+        # An open reveal states its arm inside its prediction, where the commitment covers
+        # it. A second copy beside it is covered by nothing and could contradict it.
+        report.check(
+            "baseline_visible_to_forecaster" not in entry,
+            f"reveal at seq {entry.get('seq')} is open and also carries "
+            "baseline_visible_to_forecaster outside its prediction, where the commitment does "
+            "not cover it; only a withheld reveal carries it there",
+        )
         opened += 1
         verify_quantity_proof(entry, seal, report)
         recomputed = commitment(entry.get("prediction"), str(entry.get("nonce", "")))
@@ -248,8 +399,9 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
     report.note(f"reveals: {opened} opened in full and verified, {withheld} with the text withheld")
     if withheld:
         report.note(
-            "  a withheld reveal publishes the probability, the baseline, the outcome, the "
-            "category and both pseudonyms, and counts in every statistic. What is withheld "
+            "  a withheld reveal publishes the probability, the baseline, which arm it was in, "
+            "the outcome, the category and both pseudonyms, and counts in every statistic. "
+            "What is withheld "
             "is the claim's wording and its nonce."
         )
 
@@ -428,6 +580,210 @@ def verify_sample_size(
     )
 
 
+HEADLINE_TIERS = ("A_traded", "B_prediction_market")
+"""The tiers the headline is computed over. Nothing else enters it."""
+
+REFERENCE_BASE_RATE = 0.5
+LARGEST_MARKET_ERROR = 0.5
+
+
+def detectable_market_error(groups: int, alpha: float, power: float) -> float | None:
+    """``sqrt((z_{1-a/2} + z_power)^2 * 4q(1-q) / n)`` at q = 0.5, to four places.
+
+    None when nothing has resolved, and when the answer would exceed 0.5, the largest error a
+    market can make at a 50% base rate: below that many groups no error is detectable.
+    """
+    if groups < 1:
+        return None
+    unit = NormalDist()
+    bracket = (unit.inv_cdf(1.0 - alpha / 2.0) + unit.inv_cdf(power)) ** 2
+    q = REFERENCE_BASE_RATE
+    delta = math.sqrt(bracket * 4.0 * q * (1.0 - q) / groups)
+    return None if delta > LARGEST_MARKET_ERROR else round(delta, 4)
+
+
+def _is_count(value: Any) -> bool:
+    """A group count is an int and nothing else: not 150.0, not True, not "150"."""
+    return type(value) is int
+
+
+def _stage_units(
+    reveals: list[dict[str, Any]], policy: dict[str, Any], block_days: Any
+) -> dict[str, set[Any]]:
+    """Each stage's resampling units, counted from the reveals alone.
+
+    ``headline`` and each ``by_batch.<batch>`` take a reveal that settled TRUE or FALSE in tier
+    A or B, is not flagged for contamination, has a baseline inside the policy's
+    ``trivial_band``, and was made blind to the market's number; ``baseline_visible_arm`` takes
+    the same with the number shown. Every reveal says which arm it was in: an open one inside
+    its prediction, a withheld one in its own ``baseline_visible_to_forecaster`` (step 3 fails
+    one that does not). Each ``by_tier.<tier>`` takes every settled reveal of that tier.
+    """
+    band = (policy.get("thresholds") or {}).get("trivial_band") or ["0", "1"]
+    low, high = number(band[0]), number(band[1])
+    stages: dict[str, set[Any]] = {}
+    for entry in reveals:
+        if entry.get("outcome") not in ("TRUE", "FALSE"):
+            continue
+        pseudonym = entry.get("correlation_group_pseudonym")
+        if not pseudonym:
+            continue
+        unit: Any = pseudonym
+        if block_days:
+            if not entry.get("resolution_date"):
+                continue
+            unit = (pseudonym, day_ordinal(entry["resolution_date"]) // int(block_days))
+        tier = entry.get("baseline_tier")
+        stages.setdefault(f"by_tier.{tier}", set()).add(unit)
+        if tier not in HEADLINE_TIERS or entry.get("contamination_risk"):
+            continue
+        prediction = entry.get("prediction") or {}
+        baseline = (entry.get("baseline") if entry.get("withheld") else None) or (
+            prediction.get("baseline") or {}
+        )
+        q = number(baseline.get("probability"))
+        if q is None or low is None or high is None or not (low <= q <= high):
+            continue
+        arm = (entry if entry.get("withheld") else prediction).get("baseline_visible_to_forecaster")
+        if arm is False:
+            stages.setdefault("headline", set()).add(unit)
+            stages.setdefault(f"by_batch.{entry.get('batch_id')}", set()).add(unit)
+        elif arm is True:
+            stages.setdefault("baseline_visible_arm", set()).add(unit)
+    return stages
+
+
+def _figure(groups: int | None, alpha: float, power: float) -> str:
+    value = None if groups is None else detectable_market_error(groups, alpha, power)
+    return "no figure yet" if value is None else f"{value}"
+
+
+def verify_detectable_error(
+    chain: list[dict[str, Any]], scoreboard: dict[str, Any], report: Report
+) -> None:
+    """Step 4b: the smallest detectable market error is arithmetic on a count you can make.
+
+    Every count a board states for a stage is the count of that stage's units in the reveals,
+    and every figure it states is the formula in VERIFY.md at that count, with alpha and power
+    from the policy entry the board names. The figure is absent until it has a value (32
+    groups at alpha 0.05 and 80% power), so an absence is checked too: it must mean the count
+    is too small, never that a figure was left out. A board with resolved reveals must say how
+    many groups it computed on, in an int.
+    """
+    boards = scoreboard.get("tracks") or {}
+    if not boards and scoreboard.get("headline") is not None:
+        boards = {str(scoreboard.get("policy_version")): scoreboard}
+    policies = {str(e["policy_hash"]): e for e in chain if e.get("kind") == "policy"}
+    for version, board in sorted(boards.items()):
+        policy = policies.get(str(board.get("policy_hash")))
+        if policy is None:
+            continue  # step 6b fails a board naming an unregistered policy
+        thresholds = policy.get("thresholds") or {}
+        alpha, power = number(thresholds.get("alpha")), number(thresholds.get("power"))
+        if alpha is None or power is None:
+            report.check(
+                False,
+                f"the {version} policy publishes no alpha or power, so no detectable market "
+                "error on its board can be checked",
+            )
+            continue
+        a, b = float(alpha), float(power)
+        block_days = (board.get("resampling_unit") or {}).get("block_days")
+        reveals = [
+            e
+            for e in chain
+            if e.get("kind") == "reveal" and e.get("policy_hash") == board.get("policy_hash")
+        ]
+        units = _stage_units(reveals, policy, block_days)
+        in_headline = len(units.get("headline", set()))
+
+        # The power block. Absent only on a board with nothing resolved; the note-only block
+        # every board had before #111 only while the headline holds fewer than two groups.
+        power_block = board.get("power")
+        headline = board.get("headline") or {}
+        if power_block is not None and not isinstance(power_block, dict):
+            report.check(False, f"the {version} board's power block is not an object")
+            continue
+        if not power_block:
+            report.check(
+                not reveals,
+                f"the {version} board has {len(reveals)} reveal(s) under its policy and no "
+                "power block, so it states no detectable market error and no count to check "
+                "one against",
+            )
+        elif "correlation_groups" not in power_block and "detectable_market_error" not in (
+            power_block
+        ):
+            report.check(
+                in_headline <= 1,
+                f"the {version} board's power block counts no groups; the chain holds "
+                f"{in_headline} headline groups, so it must",
+            )
+        else:
+            groups: Any = power_block.get("correlation_groups")
+            if report.check(
+                _is_count(groups),
+                f"the {version} board's power block gives its group count as {groups!r}; a "
+                "count is an integer, and the figure beside it is checked against it",
+            ):
+                report.check(
+                    groups == headline.get("correlation_groups"),
+                    f"the {version} board's power block counts {groups} groups and its headline "
+                    f"{headline.get('correlation_groups')!r}; the figure must be computed on "
+                    "the headline's own count",
+                )
+                report.note(
+                    f"detectable market error ({version}): {groups} headline group(s), "
+                    f"{_figure(groups, a, b)}"
+                )
+
+        # Every stage: its count the chain's, its figure the formula at it.
+        stages = [("power", power_block or {}), ("headline", headline)]
+        stages += [(f"by_tier.{k}", v) for k, v in sorted((board.get("by_tier") or {}).items())]
+        stages += [(f"by_batch.{k}", v) for k, v in sorted((board.get("by_batch") or {}).items())]
+        stages.append(("baseline_visible_arm", board.get("baseline_visible_arm") or {}))
+        for name, stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            has_count = "correlation_groups" in stage
+            count: Any = stage.get("correlation_groups")
+            if not has_count:
+                report.check(
+                    "detectable_market_error" not in stage,
+                    f"the {version} board's {name} states a detectable market error and no "
+                    "group count it was computed on",
+                )
+                continue
+            if not report.check(
+                _is_count(count),
+                f"the {version} board's {name} gives its group count as {count!r}; a count is "
+                "an integer",
+            ):
+                continue
+            held = len(units.get("headline" if name == "power" else name, set()))
+            report.check(
+                count == held,
+                f"the {version} board's {name} counts {count} groups; the chain holds {held}. "
+                "A larger count claims to see a smaller market error than the record can.",
+            )
+            expected = detectable_market_error(count, a, b)
+            if "detectable_market_error" in stage:
+                claimed = stage["detectable_market_error"]
+                report.check(
+                    expected is not None
+                    and type(claimed) in (int, float)
+                    and round(float(claimed), 4) == expected,
+                    f"the {version} board's {name} says the smallest detectable market error "
+                    f"is {claimed!r} at {count} groups; the formula gives {expected!r}",
+                )
+            else:
+                report.check(
+                    expected is None,
+                    f"the {version} board's {name} counts {count} groups, enough for a "
+                    f"detectable market error of {expected}, and does not publish one",
+                )
+
+
 def day_ordinal(text: Any) -> int:
     """A ``YYYY-MM-DD`` string as a proleptic-Gregorian ordinal, as the scorer computes it."""
     return dt.date.fromisoformat(str(text)[:10]).toordinal()
@@ -547,6 +903,216 @@ def verify_tracks(chain: list[dict[str, Any]], scoreboard: dict[str, Any], repor
     report.note(f"tracks: {len(boards)} board(s) — {', '.join(sorted(boards))}; none pooled")
 
 
+def _whole(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _day(value: Any) -> bool:
+    try:
+        return bool(dt.date.fromisoformat(str(value)).isoformat() == value)
+    except ValueError:
+        return False
+
+
+def _review_entry_holds(index: int, entry: dict[str, Any], report: Report) -> bool:
+    fields = set(entry) - ENTRY_FRAME
+    if not report.check(
+        fields == REVIEW_FIELDS,
+        f"entry {index}: a review entry carries {sorted(fields)}, not exactly "
+        f"{sorted(REVIEW_FIELDS)}",
+    ):
+        return False
+    raw = entry.get("discarded")
+    discarded: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    counts = [entry.get(k) for k in ("batch", "held", "released", "lapsed")]
+    if not report.check(
+        isinstance(raw, dict)
+        and set(discarded) == set(REVIEW_CLASSES)
+        and all(_whole(v) for v in discarded.values())
+        and all(_whole(v) for v in counts)
+        and _day(entry.get("decided_on")),
+        f"entry {index}: a review entry's counts are not whole numbers over exactly the "
+        f"classes {list(REVIEW_CLASSES)}, or its day is not a day",
+    ):
+        return False
+    total = entry["released"] + sum(discarded.values()) + entry["lapsed"]
+    if not report.check(
+        entry["held"] >= 1 and total == entry["held"],
+        f"entry {index}: batch {entry['batch']} held {entry['held']} forecasts but released "
+        f"+ discarded + lapsed is {total}. Every forecast in a decided batch is one of those.",
+    ):
+        return False
+    whole = entry.get("batch_discarded_as")
+    if whole is not None and not report.check(
+        whole in REVIEW_CLASSES
+        and entry["released"] == 0
+        and entry["lapsed"] == 0
+        and discarded[whole] >= 1,
+        f"entry {index}: batch {entry['batch']} says it was discarded whole as {whole!r}, but "
+        "its counts say otherwise",
+    ):
+        return False
+    for cls in WHOLE_BATCH_ONLY:
+        if discarded[cls] and not report.check(
+            whole == cls,
+            f"entry {index}: batch {entry['batch']} counts {discarded[cls]} forecast(s) "
+            f"discarded as {cls!r}, which is a whole-batch class, and the batch was not "
+            f"discarded whole as {cls!r}. No single forecast is discarded for that reason.",
+        ):
+            return False
+    fingerprint = str(entry.get("batch_fingerprint", ""))
+    return report.check(
+        len(fingerprint) == 64 and all(c in "0123456789abcdef" for c in fingerprint),
+        f"entry {index}: batch {entry['batch']}'s batch_fingerprint is not a digest",
+    )
+
+
+def _awaiting_entry_holds(index: int, entry: dict[str, Any], report: Report) -> bool:
+    fields = set(entry) - ENTRY_FRAME
+    if not report.check(
+        fields == AWAITING_FIELDS,
+        f"entry {index}: an awaiting_review entry carries {sorted(fields)}, not exactly "
+        f"{sorted(AWAITING_FIELDS)}",
+    ):
+        return False
+    counts = ("held_ever", "waiting", "oldest_waiting_days", "batches_decided")
+    return report.check(
+        all(_whole(entry.get(k)) for k in counts)
+        and _day(entry.get("on"))
+        and (entry["waiting"] > 0 or entry["oldest_waiting_days"] == 0),
+        f"entry {index}: an awaiting_review entry's counts are not whole numbers, its day is "
+        "not a day, or it says nothing waits and something has waited",
+    )
+
+
+def awaiting_complaint(before: list[dict[str, Any]], entry: dict[str, Any]) -> str | None:
+    """Why a waiting count could not follow ``before`` on the chain, or ``None``.
+
+    ``batches_decided`` is the number of ``review`` entries before it; ``waiting`` is exactly
+    ``held_ever`` minus the ``held`` of those batches; ``held_ever`` and ``on`` never fall from
+    one waiting count to the next. The record refuses to append a count this refuses, by the
+    same rule."""
+    reviews = [e for e in before if e.get("kind") == "review"]
+    counts = [e for e in before if e.get("kind") == "awaiting_review"]
+    if int(entry["batches_decided"]) != len(reviews):
+        return (
+            f"the waiting count says {entry['batches_decided']} batch(es) were decided when it "
+            f"was taken; the chain before it holds {len(reviews)}"
+        )
+    decided = sum(int(e["held"]) for e in reviews)
+    if int(entry["waiting"]) != int(entry["held_ever"]) - decided:
+        return (
+            f"{entry['held_ever']} forecast(s) were ever held and the {len(reviews)} decided "
+            f"batch(es) took {decided}, so {int(entry['held_ever']) - decided} must be waiting; "
+            f"the count says {entry['waiting']}. A forecast leaves the waiting count by being "
+            "decided in a batch on the record, or not at all."
+        )
+    if counts:
+        last = counts[-1]
+        if int(entry["held_ever"]) < int(last["held_ever"]):
+            return (
+                f"held_ever fell from {last['held_ever']} to {entry['held_ever']}; a forecast "
+                "once held is held for good"
+            )
+        if str(entry["on"]) < str(last["on"]):
+            return f"the waiting count is dated {entry['on']}, before the last one ({last['on']})"
+    return None
+
+
+def review_totals(chain: list[dict[str, Any]]) -> dict[str, Any]:
+    """The scoreboard's ``review`` block, recomputed from the chain alone."""
+    reviews = [e for e in chain if e.get("kind") == "review"]
+    awaiting = [e for e in chain if e.get("kind") == "awaiting_review"]
+    discarded = {c: sum(int(e["discarded"][c]) for e in reviews) for c in REVIEW_CLASSES}
+    latest = awaiting[-1] if awaiting else None
+    return {
+        "batches": len(reviews),
+        "held": sum(int(e["held"]) for e in reviews),
+        "released": sum(int(e["released"]) for e in reviews),
+        "discarded": discarded,
+        "discarded_total": sum(discarded.values()),
+        "lapsed": sum(int(e["lapsed"]) for e in reviews),
+        "waiting": None
+        if latest is None
+        else {
+            "on": latest["on"],
+            "held_ever": int(latest["held_ever"]),
+            "waiting": int(latest["waiting"]),
+            "oldest_waiting_days": int(latest["oldest_waiting_days"]),
+        },
+    }
+
+
+def verify_review(chain: list[dict[str, Any]], scoreboard: dict[str, Any], report: Report) -> None:
+    """Step 6c: what the owner's review removed, and that nothing sits undecided unseen.
+
+    Each ``review`` entry is one decided batch; batches run 1, 2, 3 in chain order and their
+    counts add up. Each ``awaiting_review`` entry says how many forecasts were ever held and how
+    many wait undecided, and the second is exactly the first less every batch decided before
+    it (:func:`awaiting_complaint`): a forecast leaves the waiting count by being decided, in
+    public, or not at all.
+    """
+    decided = 0
+    decided_on = ""
+    for index, entry in enumerate(chain):
+        kind = entry.get("kind")
+        if kind == "review":
+            if not _review_entry_holds(index, entry, report):
+                return
+            if not report.check(
+                entry["batch"] == decided + 1,
+                f"entry {index}: batch {entry['batch']} follows batch {decided}. Batches are "
+                "numbered 1, 2, 3 in the order they were decided; a gap is a batch the record "
+                "does not show.",
+            ):
+                return
+            if not report.check(
+                entry["decided_on"] >= decided_on,
+                f"entry {index}: batch {entry['batch']} was decided on {entry['decided_on']}, "
+                f"before the batch ahead of it ({decided_on})",
+            ):
+                return
+            decided = entry["batch"]
+            decided_on = entry["decided_on"]
+        elif kind == "awaiting_review":
+            if not _awaiting_entry_holds(index, entry, report):
+                return
+            complaint = awaiting_complaint(chain[:index], entry)
+            if not report.check(complaint is None, f"entry {index}: {complaint}"):
+                return
+    boards = scoreboard.get("tracks") or {}
+    for version, board in sorted(boards.items()):
+        report.check(
+            "review" not in board,
+            f"the scoreboard's {version} board carries its own `review`. The owner's review "
+            "is stated once, at the top level, for the whole record.",
+        )
+    totals = review_totals(chain)
+    stated = scoreboard.get("review")
+    if stated is None:
+        report.check(
+            totals["batches"] == 0 and totals["waiting"] is None,
+            "the chain carries the owner's review counts and the scoreboard shows none",
+        )
+        return
+    report.check(
+        stated == totals,
+        f"the scoreboard's `review` says {stated}; the chain's entries add up to {totals}",
+    )
+    waiting = totals["waiting"]
+    report.note(
+        f"review: {totals['batches']} batch(es) decided, {totals['held']} held, "
+        f"{totals['released']} released, {totals['discarded_total']} discarded, "
+        f"{totals['lapsed']} lapsed; "
+        + (
+            "no waiting count yet"
+            if waiting is None
+            else f"{waiting['waiting']} waiting on {waiting['on']}, oldest "
+            f"{waiting['oldest_waiting_days']} day(s)"
+        )
+    )
+
+
 def verify_publications(directory: Path, chain: list[dict[str, Any]], report: Report) -> None:
     """Step 7: the publication ledger is itself a chain, and its counts must fit the record."""
     rows = read_jsonl(directory / "publications.jsonl")
@@ -601,7 +1167,7 @@ def verify_manifest(directory: Path, report: Report) -> None:
     if not manifest_path.exists():
         report.check(False, "MANIFEST.json is missing")
         return
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = read_json(manifest_path)
     for name, expected in sorted(manifest.get("files", {}).items()):
         path = directory / name
         if not report.check(path.exists(), f"{name} is listed in MANIFEST.json but missing"):
@@ -620,7 +1186,7 @@ def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> 
             "who produced it beyond the hashes themselves."
         )
         return
-    tip = json.loads(path.read_text(encoding="utf-8"))
+    tip = read_json(path)
     expected = chain[-1]["entry_hash"] if chain else None
     report.check(
         tip.get("tip") == expected,
@@ -794,14 +1360,15 @@ def _ots_varuint(payload: bytes) -> int:
     raise OtsBroken("a Bitcoin attestation with no height")
 
 
-def verify_anchors(directory: Path, report: Report) -> None:
+def verify_anchors(directory: Path, scoreboard: dict[str, Any], report: Report) -> None:
     """Step 10: the timestamps, as far as this script can go without Bitcoin.
 
-    Four things, all offline. The anchored run has no gap in it. It reaches the publication
+    Five things, all offline. The anchored run has no gap in it. It reaches the publication
     you are looking at, or is exactly one behind it. Every proof named is here, parses, and
     is a proof of the little file beside it — whose contents are the manifest digest its row
-    claims. And a row that says "confirmed" names a proof that really carries a Bitcoin
-    attestation at the height the row states.
+    claims. A row that says "confirmed" names a proof that really carries a Bitcoin
+    attestation at the height the row states. And the rows here add up to what
+    `scoreboard.json` says about them, which is the check you would make by hand.
 
     What is left is the part that needs the chain: whether that block really contains that
     commitment. Run `ots verify` on the files in `anchors/`, ideally against your own node.
@@ -826,6 +1393,75 @@ def verify_anchors(directory: Path, report: Report) -> None:
 
     _verify_anchor_tail(directory, rows, seqs, report)
     _verify_anchor_proofs(directory, rows, report)
+    _verify_anchor_counts(directory, scoreboard, seqs, report)
+
+
+def _verify_anchor_counts(
+    directory: Path, scoreboard: dict[str, Any], seqs: list[int], report: Report
+) -> None:
+    """`scoreboard.json`'s `attempted` against the rows, allowing the one row it cannot count.
+
+    This publication is stamped as it is delivered, which is after `scoreboard.json` was
+    written and hashed into the `MANIFEST.json` that the row stamps — so the counts in that
+    file cannot include the row that names it, and `anchors/` sits outside the manifest, so
+    the row reaches you in the same commit anyway. The file says which publication it leaves
+    out, under `excludes_publication_seq`, and this is the arithmetic that uses it: every row
+    but that one is counted in `attempted`, exactly.
+
+    The publication it leaves out can only be the newest one in `publications.jsonl`, the one
+    whose files these are. Without that, a scoreboard could leave out an *older* row that is
+    sitting right there, set `attempted` one short to match, and pass the arithmetic while
+    describing a different record from the one in front of you.
+
+    Only `attempted` is checked and the other counts deliberately are not. A row goes from
+    pending to confirmed after the publication that carries it was built, so `confirmed` here
+    can be behind the index by a proof or two, in the direction of claiming *less* evidence
+    than the record holds. `attempted` has no such slack: rows are added one per publication
+    and never otherwise.
+
+    A record published before this field existed is not failed for lacking it. That is a
+    statement about when it was published, not about whether it is honest.
+    """
+    stated = scoreboard.get("anchoring")
+    if not isinstance(stated, dict) or "attempted" not in stated:
+        return
+    if "excludes_publication_seq" not in stated:
+        report.note(
+            "anchors: this publication predates the field that says which publication its "
+            "counts leave out, so `attempted` here may be one behind the rows in "
+            "anchors/index.jsonl. Later publications say so in the file."
+        )
+        return
+    excluded = stated.get("excludes_publication_seq")
+    attempted = stated.get("attempted")
+    # Read defensively and fail rather than raise. This script is published and run against
+    # records somebody may have edited, and a traceback out of `int()` is a reader being told
+    # nothing about a file that is, in fact, wrong.
+    if not isinstance(attempted, int) or not isinstance(excluded, int | None):
+        report.check(
+            False,
+            "anchors: scoreboard.json's anchor counts are not numbers "
+            f"(attempted={attempted!r}, excludes_publication_seq={excluded!r}), so there is "
+            "nothing here to check them against the rows with.",
+        )
+        return
+    ledger = read_jsonl(directory / "publications.jsonl")
+    if excluded is not None and ledger:
+        newest = len(ledger) - 1
+        if not report.check(
+            excluded == newest,
+            f"anchors: scoreboard.json leaves publication {excluded} out of its counts, but "
+            f"these files are publication {newest}. The only row a scoreboard cannot count is "
+            "its own publication's; leaving out any other is counting a different record.",
+        ):
+            return
+    counted = [seq for seq in seqs if seq != excluded]
+    report.check(
+        len(counted) == attempted,
+        f"anchors: scoreboard.json counts {attempted} attempt(s); anchors/index.jsonl holds "
+        f"{len(seqs)} row(s) and the scoreboard leaves out publication {excluded!r}. Those "
+        "do not add up, and a published record has to.",
+    )
 
 
 def _verify_anchor_tail(
@@ -833,10 +1469,12 @@ def _verify_anchor_tail(
 ) -> None:
     """The newest row against the publication in front of you.
 
-    One publication behind is the normal state and not a fault: a publication is stamped as
-    it is delivered, which is after the files you are reading were built, so its row travels
-    with the *next* publication. Two behind is a record that stopped anchoring, which is what
-    somebody would do to leave an inconvenient day unstamped.
+    A publication is stamped as it is delivered, which is after the files you are reading were
+    built. `anchors/` is outside `MANIFEST.json`, so that row is committed with this same
+    publication, and in a record you fetched the newest row is normally this publication's
+    own. One behind is the other legal state and not a fault: it is what a publication looks
+    like before it has been delivered. Two behind is a record that stopped anchoring, which is
+    what somebody would do to leave an inconvenient day unstamped.
     """
     ledger = read_jsonl(directory / "publications.jsonl")
     if not ledger:
@@ -871,8 +1509,8 @@ def _verify_anchor_tail(
     elif newest == current - 1:
         report.note(
             f"anchors: publication {current} has no row yet. A publication is stamped as it "
-            "is delivered, so its row arrives with the next one; every publication before it "
-            "is anchored."
+            "is delivered, and these files have not been delivered yet or the stamp has not "
+            "been written; every publication before it is anchored."
         )
     else:
         report.check(
@@ -967,7 +1605,7 @@ def main(argv: list[str]) -> int:
     scoreboard_path = directory / "scoreboard.json"
     scoreboard: dict[str, Any] = {}
     if scoreboard_path.exists():
-        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
+        scoreboard = read_json(scoreboard_path)
 
     report = Report()
     verify_chain(chain, report)
@@ -980,13 +1618,15 @@ def main(argv: list[str]) -> int:
         verify_reveals(chain, report)
         verify_accounting(chain, scoreboard, report)
         verify_sample_size(chain, scoreboard, report)
+        verify_detectable_error(chain, scoreboard, report)
         verify_scores(chain, report)
         verify_policies(chain, report)
         verify_tracks(chain, scoreboard, report)
+        verify_review(chain, scoreboard, report)
         verify_publications(directory, chain, report)
     verify_manifest(directory, report)
     verify_tip(directory, chain, report)
-    verify_anchors(directory, report)
+    verify_anchors(directory, scoreboard, report)
 
     for note in report.notes:
         print(note)
@@ -999,7 +1639,10 @@ def main(argv: list[str]) -> int:
         return 1
     if report.unmade:
         print()
-        print(f"INCOMPLETE: {len(report.unmade)} check(s) could not be made on this machine.")
+        print(
+            f"INCOMPLETE: {len(report.unmade)} check(s) could not be made, "
+            "on this machine or from these files."
+        )
         print("Nothing here failed — that is exit 1. This is exit 2. What was not checked:")
         for message in report.unmade:
             print(f"  {message}")
