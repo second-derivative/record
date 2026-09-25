@@ -20,7 +20,7 @@ It is published so that the claim can be checked by someone who assumes we are l
 | `scoreboard.json` | every metric, the counts, the refusals, and the worst-case bound |
 | `publications.jsonl` | one line per publication, so the sequence can be checked for gaps |
 | `anchors/` | each publication's manifest digest, its OpenTimestamps proof, and an index over both |
-| `tip.json` | the signed chain tip, and the public half of the key that signed it |
+| `tip.json` | the signed chain tip, and the public half of the key that signed it, which must be this record's publish key |
 | `MANIFEST.json` | the SHA-256 of every file above |
 | `VERIFY.md` | the verification procedure, normative |
 | `verify.py` | a convenience implementation of it, which opens no network connection |
@@ -39,6 +39,19 @@ not be made on your machine and names it: checking the signature on `tip.json` n
 could not make that check says so rather than reporting a pass it did not make. An older
 Python exits 2 too, before checking anything. `VERIFY.md` has
 the install command and the exit codes, normatively.
+
+A valid signature on its own says only that somebody signed `tip.json`: anybody can make a key
+and put its public half beside a signature. So `verify.py` also checks that the key is this
+record's publish key, which it carries and prints on its last line, and fails a tip signed under
+any other. To check against a key you found yourself rather than the one it carries, run
+`python3 -I verify.py . --expect-key <the key>`; `VERIFY.md` shows how to read the key off the
+earliest publication a Bitcoin block timestamps.
+
+A pass means the key holder signed this state of the record, not that it is the latest. An
+older copy, served whole, passes too. Every pass prints the `entry_hash` of the newest line in
+`publications.jsonl`; keep it, and pass it to your next run as `--expect-ledger-prefix <hash>`,
+which fails a copy that does not continue the ledger you saw. `--expect-at-least <seq>` is
+weaker: ledger lines are not signed, so lines appended to an older copy can reach any `seq`.
 
 `VERIFY.md` is normative and `verify.py` is a convenience. Where the two disagree, `VERIFY.md` is
 right and `verify.py` is the bug — and the strongest form of the check is to write your own from

@@ -23,6 +23,8 @@
   "domains": {
     "note": "Every digest is prefixed with a domain tag and a 0x00 separator, so two different claims about two different objects can never be confusable. An implementation that omits the tag produces digests that verify against nothing.",
     "commit": "sd/record/commit/v1",
+    "numbers": "sd/record/numbers/v1",
+    "facets": "sd/record/facets/v1",
     "entry": "sd/record/entry/v1",
     "context": "sd/record/context/v1",
     "cluster_pseudonym": "sd/record/cluster/v1",
@@ -112,5 +114,18 @@
     "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
     "recipe": "sha256(commit_domain + b'\\x00' + canonical_json(payload) + b'\\x00' + nonce_bytes)",
     "commitment": "e8877149e262f72564d5773ba2b8b74fb0b70127b10728a664ead9ac1b962e89"
+  },
+  "facets_commitment_example": {
+    "payload": {
+      "category": "memory-and-packaging",
+      "cluster_pseudonym": "1111111111111111111111111111111111111111111111111111111111111111",
+      "contamination_risk": false,
+      "correlation_group_pseudonym": "2222222222222222222222222222222222222222222222222222222222222222",
+      "resolution_date": "2027-03-31",
+      "resolution_deadline": "2027-05-30"
+    },
+    "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "recipe": "sha256(facets_domain + b'\\x00' + canonical_json(payload) + b'\\x00' + nonce_bytes)",
+    "facets_commitment": "5198cbd4f9349b144702dd95edd319e6c5545a39645ec5255e0e4118673e7bdb"
   }
 }

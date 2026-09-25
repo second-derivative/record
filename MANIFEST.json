@@ -1,14 +1,14 @@
 {
   "files": {
-    "README.md": "09e9e5b4e86930f1a18328f4fe3d8fac3e27ffed382817c4194fd2798a70682f",
-    "VERIFY.md": "d7b4f2304a040515719570ee50b77c7a4e6eb79fd5e305bd6a77dbb9c0d8f46d",
-    "canon-vectors.json": "adba2b1f6b608810c54b165446997da4a9fe9bb261947b2839894c36cd358389",
+    "README.md": "0a500f32b6e877dfc3e63a14c5111bfa07759d5b8e4fb52ef86fd352bb45ff56",
+    "VERIFY.md": "5d5983d05c155e3136c31319d710f4da4f65b297b1469a60f829482b71ecadc6",
+    "canon-vectors.json": "a2ac9c9c8599597d205ea88e509708059bca92e86e12fd172638daaf97ccb3bf",
     "chain.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "publications.jsonl": "ac9889814166afcbfa05f70062572fdd59d28d8f95a761fa8dfee08fd0a02374",
+    "publications.jsonl": "8df429c5b87bb7cb317cc87d5ef6b9d6df34199b5303ead8abed0671fcdc694c",
     "reveals.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scoreboard.json": "3cd35216342587022c5a5fec4f1ea8920625fd850170d9c10dd866abf52ab9ab",
-    "tip.json": "0264ea73603da5044fd3ca5920cad06b52682a836eb31ec9c559af5f8205658b",
-    "verify.py": "c723dcf0c00688828b6271ddc187cdf9397e5f91752352b776644b89d898e9d3"
+    "scoreboard.json": "8416a1a2aff20ca7da40b97edbd781e347d334f702c1eb3edb10865765bed76b",
+    "tip.json": "20cf77330df5998243639ef99f47ce235157f6da951aa3299149875fa4fdd265",
+    "verify.py": "ea9dfd60b8a0b201566966f934aef120bc2fecc61578a5f0958441f8744beb21"
   },
   "note": "anchors/ is excluded on purpose: the manifest covers the record, the anchor index points at the manifest, and nothing hashes itself."
 }

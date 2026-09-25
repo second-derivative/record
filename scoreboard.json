@@ -10,23 +10,23 @@
   "anchoring": {
     "anchored": true,
     "anchored_from_seq": 3,
-    "attempted": 4,
-    "confirmed": 4,
-    "confirmed_through_seq": 6,
+    "attempted": 5,
+    "confirmed": 5,
+    "confirmed_through_seq": 7,
     "contiguous": true,
-    "excludes_publication_seq": 7,
+    "excludes_publication_seq": 8,
     "failed": 0,
     "first_gap_at_seq": null,
-    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 7's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 7's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
+    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 8's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 8's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
     "pending": 0
   },
-  "as_of": "2026-09-24",
+  "as_of": "2026-09-25",
   "chain": {
     "entries": 0,
     "intact": true,
     "tip": null
   },
-  "exported_at": "2026-09-24T05:00:07.162107+00:00",
+  "exported_at": "2026-09-25T05:00:26.988041+00:00",
   "never_pooled": true,
   "policy_versions": [],
   "recomputation": {

@@ -9,16 +9,26 @@ Each line of `chain.jsonl` is one entry. Each carries `prev_hash`, the previous 
 the next line's `prev_hash`. Hiding an edit means rewriting every entry after it, and the
 anchoring proofs below are what stop that.
 
-A `seal` entry says a prediction was committed to on a stated day. It carries three
+A `seal` entry says a prediction was committed to on a stated day. It carries four
 commitments — one to the prediction, one to its three numbers on their own
-(`numbers_commitment`), one to material that is never opened — a cluster
-pseudonym, the day, the quarter the prediction comes due, and the hash of the policy it was
-sealed under. It carries nothing about the claim, not even its category: a prediction can
-stay sealed for a year, and a few hundred categories and resolution dates would describe
-everything still outstanding.
+(`numbers_commitment`), one to the six facts its reveal is grouped and counted by
+(`facets_commitment`), one to material that is never opened — the day, the quarter the
+prediction comes due, and the hash of the policy it was sealed under. It carries nothing
+about the claim, not even its category or its cluster: a prediction can stay sealed for a
+year, and a few hundred categories, clusters and resolution dates would describe everything
+still outstanding.
 
 A `reveal` entry opens one: the full prediction, the nonce, the outcome, the citation that
-settled it, and the category, tier and dates the seal entry withheld.
+settled it, and the category, tier, cluster, correlation group and dates the seal entry
+withheld.
+
+Seal and reveal entries carry `entry_version`. This page describes version 2, the only
+version this record publishes. An entry without the field is version 1, whose seal named its
+cluster pseudonym in the open and carried no `facets_commitment`; `verify.py` still checks
+version 1 so that any chain written before version 2 verifies, and a version 2 reveal must
+name a version 2 seal, and a version 1 reveal a version 1 seal. It does not go back:
+`verify.py` fails any version 1 seal or reveal after the first version 2 seal on the chain, and
+any version 1 seal that carries a `facets_commitment`.
 
 A reveal marked `"withheld": true` is the one exception, and it is a narrow one. Where the
 claim's own wording cannot be published, the text and its nonce stay unpublished — but the
@@ -35,9 +45,10 @@ Two things are deliberately **not** in this file. Entries carry an `actor_digest
 of a signature: the digest tells you which entries share a signer and nothing else, and a
 signature is only worth checking against a key you have some reason to trust, which is not
 the case for any key that signs an entry as it is written. The signature that is worth
-checking is the one on `tip.json`, whose key is published; it is covered below. And seal and
-reveal times are days, not instants; `scoreboard.json` carries `seals_by_day` so you can
-still see whether this record was built steadily or assembled in one sitting.
+checking is the one on `tip.json`, under the one publish key this record has; it is covered
+below, with how to tell that key is this record's. And seal and reveal times are days, not
+instants; `scoreboard.json` carries `seals_by_day` so you can still see whether this record
+was built steadily or assembled in one sitting.
 
 ## Check the chain
 
@@ -105,7 +116,80 @@ not open it.
 The domain tag is its own, not the prediction's, so a digest made for one commitment can never
 stand for the other. And a seal is opened once: `verify.py` fails a second reveal naming a seal
 another reveal already opened, which could otherwise borrow that seal's numbers and nonce whole,
-and a reveal whose `cluster_pseudonym` is not its seal's.
+and a version 1 reveal whose `cluster_pseudonym` is not its seal's.
+
+## Check a reveal's facets against what was sealed
+
+Every statistic on the scoreboard is grouped and counted by six facts each reveal publishes at
+its top level: `category`, `cluster_pseudonym`, `contamination_risk`,
+`correlation_group_pseudonym`, `resolution_date` and `resolution_deadline`. None of them is on
+the seal, because across a few hundred open predictions they would draw where the open
+predictions are concentrated. Each version 2 `seal` commits to all six on their own, under a
+nonce of their own, and every version 2 `reveal`, open or withheld, publishes that nonce as
+`facets_nonce`. Take the six exactly as the reveal spells them (the dates as `YYYY-MM-DD`
+strings, the flag as a JSON `true` or `false`):
+
+    facets = {
+        "category": ...,
+        "cluster_pseudonym": ...,
+        "contamination_risk": ...,
+        "correlation_group_pseudonym": ...,
+        "resolution_date": ...,
+        "resolution_deadline": ...,
+    }
+    facets_commitment == sha256(
+        b"sd/record/facets/v1" + b"\x00"
+        + canonical_json(facets) + b"\x00"
+        + bytes.fromhex(facets_nonce)
+    ).hexdigest()
+
+where `facets_commitment` is the one on the seal entry the reveal names. So the cluster, the
+group, the category, the dates and the flag stay hidden while a prediction is open, and cannot
+be changed once it resolves. `facets_nonce` opens nothing else. `verify.py` fails a version 2
+seal with no `facets_commitment` or with a `cluster_pseudonym`, a version 2 reveal with no
+`facets_nonce`, and any reveal whose facets do not open it.
+
+Then, on every reveal of either version:
+
+1. `quarter(resolution_deadline)` equals the seal's `deadline_quarter`.
+2. On an open reveal, `category`, `resolution_date` and `resolution_deadline` equal the opened
+   prediction's own.
+3. `baseline_tier` equals the `tier` inside the `baseline` the numbers commitment opened: the
+   prediction's on an open reveal, the reveal's own on a withheld one.
+4. `policy_hash` equals the seal's.
+5. Among the reveals under one `policy_hash`, each cluster pseudonym sits in one correlation
+   group. Two policies may group a cluster differently, and are never pooled.
+
+## Reasons are codes
+
+Nothing a reveal publishes as a reason is a sentence. Each is a code from a closed list, and
+`verify.py` fails a version 2 reveal carrying anything else.
+
+`withheld_reason`, on a withheld reveal only:
+
+- `text_reveals_method`: the wording of the claim would say how the record is produced.
+- `text_quotes_restricted_material`: the wording quotes material this record may not republish.
+
+`reason` is empty on `TRUE`, `FALSE` and `VOID`, where the citation or the enumerated
+condition is the reason. It is required on `DISCRETIONARY_VOID` and `UNREVEALABLE`, and may be
+given on `UNRESOLVED_OVERDUE`:
+
+- `claim_unsettleable` (`DISCRETIONARY_VOID`): the question could not be settled as written.
+- `reading_unavailable` (`DISCRETIONARY_VOID`): the document named at seal to settle the claim
+  published no reading by the deadline.
+- `condition_unmatched` (`DISCRETIONARY_VOID`): the claim could not be settled for a reason
+  none of its enumerated void conditions names.
+- `process_fault` (`DISCRETIONARY_VOID`, `UNREVEALABLE`): the process that records outcomes
+  failed, so no reading could be recorded.
+- `nonce_unrecoverable` (`UNREVEALABLE`): the nonce that opens the commitment could not be
+  produced.
+- `deadline_passed` (`UNRESOLVED_OVERDUE`): the deadline passed with no cited resolution.
+
+`void_condition_id` is set only when the outcome is `VOID`. On an open reveal it is the `id` of
+one of the opened prediction's `void_conditions`. On a withheld reveal the conditions are not
+published, so it is one of `document_not_published` (the document named to settle the claim
+was not published in time), `period_redefined` (the reported period or figure was redefined)
+or `enumerated_condition` (any other condition enumerated at seal).
 
 ## Check that the claim's quantity meant this when it was sealed
 
@@ -278,7 +362,7 @@ or `true`, and must equal the count of that stage's units in the reveals. A
 stage that states a figure must state the count it was computed on, and a board with reveals
 under its policy must have a power block.
 
-## Check a publication, where `tip.json` is present
+## Check the signature on `tip.json`, and the key that made it
 
 This is the one check that needs something beyond the Python standard library: Ed25519
 verification.
@@ -310,10 +394,105 @@ key that made it. Reconstruct the signed bytes as
         "payload": {"tip": ..., "entries": ..., "exported_at": ...},
     })
 
-and verify the signature against that public key. It tells you this exact file came from
-us. It is deliberately not the key that signs an entry as it is written: this one is
-published and therefore under study, and losing it would let somebody forge a publication
-you can detect, not a commitment you cannot.
+and verify the signature against that public key. Then check the key itself. This record's
+publish key is
+
+    7fb92f0f0dce1ae7839a6f133e2a57e953b422b9363fe3b306e96f7b72113665
+
+and its id, the `key_id` in `tip.json`, is its first sixteen characters. The public half in
+`tip.json` must be exactly this key, all 64 characters of it: an id is a label anybody can
+copy.
+
+The second check is the one that matters. Anybody can make a key, sign a tip with it and put
+its public half beside the signature, so a signature checked only against the key `tip.json`
+names proves that the file is unchanged since somebody signed it, and nothing about who. A
+record cut short and signed again under a key made that afternoon passes the first check and
+fails the second.
+
+Together they prove this: whoever holds this record's publish key signed this chain tip, this
+entry count and this export time. They do not prove the key is ours, and nothing inside a
+publication can, because whoever rewrites a publication can rewrite this file and `verify.py`
+with it. Two things outside it can.
+
+- A copy you already hold. Keep the key from a publication you fetched earlier, or the
+  `verify.py` that came with it, and check every later publication against it:
+  `python3 verify.py . --expect-key <the key>`.
+- Bitcoin. Take the earliest row in `anchors/index.jsonl` that is `confirmed`, and the
+  record as it stood at that publication (one commit of the record's repository). Check that
+  the SHA-256 of that `MANIFEST.json` is the row's `manifest_sha256` and run `ots verify` on
+  its proof (below); check that the same `MANIFEST.json` gives the SHA-256 of that `tip.json`;
+  and read the key in that `tip.json`. It was fixed before that block was mined.
+
+A publication signed under any other key fails, and so does one with no `tip.json`, because
+deleting the signature is the simplest way around checking it. It is deliberately not the key
+that signs an entry as it is written: this one is published and therefore under study, and
+losing it would let somebody forge a publication you can detect, not a commitment you cannot.
+
+`verify.py` carries the key above as `PUBLISH_KEY`, fails a tip signed under any other, and
+prints the key on its last line; `--expect-key` adds the one you found yourself, and fails the
+run if the two differ.
+
+### Changing the publish key
+
+The key can be changed in one way only. The old key signs a statement naming the new key and
+the first publication the new key signs. That statement is committed to this record and
+anchored like any publication, so it is fixed before a Bitcoin block, and from that publication
+on `verify.py` and this file carry the new key. A publication from before the change is checked
+with the `verify.py` it was published with, which is in the record repository's history at
+that publication's commit. A new key that no such statement names, signed by the old key and
+anchored, is not a change of key: it is somebody else's key, and every publication under it
+fails. No such statement has been made; every publication so far is under the key above.
+
+A record signed by a new key fails against the key you hold, in a `verify.py` you kept or given
+as `--expect-key`, even after a genuine change: that is the pin doing its job. The statement's
+bytes, its domain tag and where in the record it sits will be specified here when rotation is
+built; no `verify.py` reads one yet. `--expect-key` only adds a pin beside `PUBLISH_KEY` and
+never replaces it, so accepting a new key means editing the `PUBLISH_KEY` line of the
+`verify.py` you hold, by hand, after you have checked the anchored statement yourself.
+
+### A valid signature is not the latest state
+
+Everything above proves that the key holder signed this state of the record. It does not prove
+this is the newest state. A copy served as it stood before later publications, every file as it
+was and every signature genuine, passes every check in this file. Only what you have already
+seen can refuse it, so tell `verify.py`:
+
+- `--expect-at-least <seq>`: the `seq` of the newest line of `publications.jsonl` you have seen.
+  The run fails if this record's ledger ends before that publication.
+- `--expect-ledger-prefix <hash>`: the `entry_hash` of a line of `publications.jsonl` you have
+  seen, normally its last. The run fails unless this ledger has a line with that `entry_hash`.
+  Each line is hash-linked to the one before it and carries its own `seq`, so that line and
+  every line before it are the lines you saw, in the places you saw them: the ledger you saw is
+  the start of this one, and a record cut back below it or rewritten fails.
+
+The ledger lines are not themselves signed, so `--expect-at-least` alone is weak: lines can be
+appended to an older copy until it reaches the `seq` you pass, and the run passes. They cannot
+be made to hash to a line you saw, so `--expect-ledger-prefix` is the check that refuses an older
+copy. `verify.py` prints the newest line's `entry_hash` on every pass; keep it and pass it to
+your next run. The hash you keep is only as good as the copy you kept it from: a forged line
+appended to a genuine copy passes too, and if its hash is the one you kept, the genuine record
+then fails as cut back or rewritten, so the copy the hash was kept from may be the forged one.
+
+## Check the publication ledger and the manifest
+
+`publications.jsonl` has one line per publication, hash-linked like the chain: `entry_hash`,
+`prev_hash` and `seq` follow the rule in "Check the chain". Every line records the chain as
+it stood when that publication was made, and the chain only grows, so check every line, not
+only the newest: its `chain_entries` is no more than the chain now holds and no fewer than the
+line before it; its `chain_tip` is the `entry_hash` of entry `chain_entries - 1` (`genesis`
+for none); and its `sealed_total` is the number of `seal` entries among those first
+`chain_entries`. A chain cut short breaks the older lines even when the newest was rewritten
+to fit. A publication with no `publications.jsonl` fails.
+
+The newest line is the publication `tip.json` signs, so its `at` is the UTC day of `exported_at`
+in `tip.json`. A newest line on any other day was added after the signature, and fails.
+
+`MANIFEST.json` gives the SHA-256 of every file in the publication except itself and
+`anchors/`, and must include `chain.jsonl`, `publications.jsonl` and `tip.json`: its digest
+is what an anchor timestamps, and a file it leaves out is a file no timestamp covers. Each
+name is a plain relative path with forward slashes. A name that is absolute, contains `..`,
+reaches its file through a link or names something that is not a regular file is not a file
+in this record, and fails.
 
 ## Check the timestamps
 

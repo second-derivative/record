@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Verify Second Derivative's public record.
 
-    python3 verify.py [directory]
+    python3 verify.py [directory] [--expect-key <64 hex characters>]
+                      [--expect-at-least <publication>] [--expect-ledger-prefix <64 hex>]
 
 It needs Python 3.10 or newer. An older Python exits 2 before checking anything, because
 exit 1 is an accusation against the record and a reader's Python is not the record's fault.
@@ -20,6 +21,20 @@ One check needs one package. Verifying the Ed25519 signature on tip.json needs
 `cryptography`, which is not in the standard library; everything else here is. A run that
 cannot make that check exits 2 and names it, rather than printing a pass it did not earn.
 Exit 2 is not an accusation against the record; exit 1 is.
+
+A valid signature is only half of that check. Anybody can make a key, sign a tip with it and
+put its public half in tip.json, so a signature checked against the key tip.json names proves
+nothing about who signed it. The other half is the key itself: it must be this record's
+publish key, which this file carries as PUBLISH_KEY and prints on its last line. `--expect-key`
+checks it against a key you found yourself, out of band; VERIFY.md says how to read it off the
+earliest publication a Bitcoin block timestamps.
+
+A pass says the files are a state the key holder signed. It does not say they are the newest
+state: a copy served from before later publications, every file as it was and every signature
+genuine, passes every check here. `--expect-ledger-prefix` tells this script the newest ledger
+line you have already seen, and it fails a copy that does not continue that line.
+`--expect-at-least` is weaker: the ledger's lines are not signed, so lines appended to an older
+copy can reach any publication number and pass it.
 
 VERIFY.md is the normative version of these checks and is written so that you can
 reimplement them yourself in about twenty lines. If this script and VERIFY.md ever disagree,
@@ -40,13 +55,16 @@ consult a block explorer, and neither does anything we run.
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import hashlib
 import json
 import math
+import os
+import stat
 import sys
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from statistics import NormalDist
 from typing import Any
 
@@ -64,8 +82,53 @@ if sys.version_info < MINIMUM_PYTHON:
     )
     raise SystemExit(2)
 
+PUBLISH_KEY = "7fb92f0f0dce1ae7839a6f133e2a57e953b422b9363fe3b306e96f7b72113665"
+"""This record's publish key: the Ed25519 public half, as 64 hex characters.
+
+Its id is its first sixteen characters, 7fb92f0f0dce1ae7, the `key_id` in every tip.json this
+record has published. The whole key is pinned and not only the id, because an id is a label a
+forger can copy into their own tip.json, and sixteen hex characters is a prefix somebody could
+search for; the whole key is not.
+
+Why a constant. The publication ledger records no key, and tip.json carries whichever key
+signed it, so nothing in a publication says which key is the record's own. Reading it off
+tip.json is what let a record cut short and signed again under a key made that afternoon pass.
+What makes this one the record's is the earliest publication a Bitcoin block timestamps: its
+MANIFEST.json covers its tip.json, and that tip.json names this key. VERIFY.md shows how to
+check that yourself, and then `--expect-key` lets you pass what you found.
+
+A constant is a pin, not a proof: whoever rewrites a publication can rewrite this line too. So
+it is worth most in a verify.py you already hold, which checks every later publication against
+the key it knew. A publication under any other key fails here.
+
+Changing the key. The old key signs a statement naming the new key and the first publication
+the new key signs; that statement is committed to this record and anchored like any
+publication. From that publication on, verify.py carries the new key. A publication from before
+the change is checked with the verify.py it was published with, which is in the record
+repository's history at that publication's commit. A new key without that statement, signed by
+the old key and anchored, is not a change of key: it is somebody else's key, and fails. No such
+statement has been made, so this file checks one key.
+
+Until then, and after: a record signed by a new key fails against the key you hold, in this
+file or given as `--expect-key`, even after a genuine change. The statement's bytes, its domain
+tag and where in the record it sits will be specified when rotation is built; nothing here reads
+one yet. `--expect-key` only adds a pin beside this one and never replaces it, so accepting a new
+key means editing the PUBLISH_KEY line of the verify.py you hold, by hand, after you have checked
+the anchored statement yourself.
+"""
+
+MANIFEST_MAX_BYTES = 256 * 1024 * 1024
+"""The largest file this script will hash for MANIFEST.json. Far above any real record; its
+job is to make a manifest naming something endless fail instead of reading forever."""
+
+MANIFEST_MUST_COVER = ("chain.jsonl", "publications.jsonl", "tip.json")
+"""Files the manifest has to name. The anchored manifest digest is what ties the ledger and
+the signed tip, and with it the publish key, to a Bitcoin block; a manifest that left one out
+would timestamp a publication without it."""
+
 COMMIT_DOMAIN = b"sd/record/commit/v1"
 NUMBERS_DOMAIN = b"sd/record/numbers/v1"
+FACETS_DOMAIN = b"sd/record/facets/v1"
 ENTRY_DOMAIN = b"sd/record/entry/v1"
 SIGNATURE_DOMAIN = b"sd/core/actor/v1"
 REGISTRY_DOMAIN = b"sd/record/registry/v1"
@@ -106,6 +169,43 @@ def entry_hash(entry: dict[str, Any]) -> str:
 
 NUMBERS_FIELDS = ("probability", "baseline", "baseline_visible_to_forecaster")
 """What a seal's ``numbers_commitment`` covers, in the payload ``{field: value}``."""
+
+FACETS_FIELDS = (
+    "category",
+    "cluster_pseudonym",
+    "contamination_risk",
+    "correlation_group_pseudonym",
+    "resolution_date",
+    "resolution_deadline",
+)
+"""What a version 2 seal's ``facets_commitment`` covers: six facts from the reveal's top level."""
+
+ENTRY_VERSIONS = (1, 2)
+"""The seal and reveal shapes this script reads. No ``entry_version`` field means 1."""
+
+WITHHELD_REASONS = ("text_reveals_method", "text_quotes_restricted_material")
+"""The codes a version 2 withheld reveal's ``withheld_reason`` may carry, and no others."""
+
+REASON_CODES = {
+    "TRUE": (),
+    "FALSE": (),
+    "VOID": (),
+    "DISCRETIONARY_VOID": (
+        "claim_unsettleable",
+        "reading_unavailable",
+        "condition_unmatched",
+        "process_fault",
+    ),
+    "UNREVEALABLE": ("nonce_unrecoverable", "process_fault"),
+    "UNRESOLVED_OVERDUE": ("deadline_passed",),
+}
+"""The codes a version 2 reveal's ``reason`` may carry, per outcome. Empty means none at all."""
+
+REASON_REQUIRED = ("DISCRETIONARY_VOID", "UNREVEALABLE")
+"""Outcomes whose version 2 reveal must give a code."""
+
+WITHHELD_VOID_CODES = ("document_not_published", "period_redefined", "enumerated_condition")
+"""What a version 2 withheld ``VOID`` reveal may give as its ``void_condition_id``."""
 
 
 def is_digest(value: Any) -> bool:
@@ -153,6 +253,25 @@ def review_fingerprint(salt_hex: str, rows: list[list[str]]) -> str:
     return hashlib.sha256(
         REVIEW_DOMAIN + b"\x00" + bytes.fromhex(salt_hex) + b"\x00" + canonical(sorted(rows))
     ).hexdigest()
+
+
+def entry_version(entry: dict[str, Any]) -> Any:
+    """A seal's or reveal's ``entry_version``: absent is 1."""
+    return entry.get("entry_version", 1)
+
+
+def known_version(value: Any) -> bool:
+    """1 or 2, as a JSON integer: not ``2.0``, not ``true``, not ``"2"``."""
+    return type(value) is int and value in ENTRY_VERSIONS
+
+
+def quarter_of(day: Any) -> str | None:
+    """``2027-05-14`` is in ``2027Q2``. ``None`` for anything that is not a day."""
+    try:
+        date = dt.date.fromisoformat(str(day))
+    except ValueError:
+        return None
+    return f"{date.year}Q{(date.month - 1) // 3 + 1}"
 
 
 def quarter_ended_before(quarter: str, day: str) -> bool:
@@ -231,6 +350,13 @@ class Report:
         self.failures: list[str] = []
         self.unmade: list[str] = []
         self.notes: list[str] = []
+        # The publish key the tip was checked against, and what said it was this record's.
+        self.signed_by: str | None = None
+        self.pinned_by: list[str] = []
+        # The newest publication the ledger names, and the day tip.json was signed.
+        self.newest_publication: int | None = None
+        self.newest_line: str | None = None
+        self.signed_on: str | None = None
 
     def check(self, ok: bool, message: str) -> bool:
         if not ok:
@@ -254,6 +380,7 @@ class Report:
 def verify_chain(chain: list[dict[str, Any]], report: Report) -> None:
     """Step 1: every digest, every link, every sequence number."""
     previous = GENESIS
+    first_v2_seal: int | None = None
     for index, entry in enumerate(chain):
         stated = str(entry.get("entry_hash", ""))
         recomputed = entry_hash(entry)
@@ -272,6 +399,22 @@ def verify_chain(chain: list[dict[str, Any]], report: Report) -> None:
             f"entry {index}: seq is {entry.get('seq')!r} (an entry was deleted or reordered)",
         ):
             return
+        if entry.get("kind") in ("seal", "reveal"):
+            # No going back. This holds a version 1 reveal to it too, so a version 1 seal still
+            # open at the change could not be opened after it; the public chain held no seal
+            # when version 2 landed, so none is.
+            version = entry_version(entry)
+            if first_v2_seal is not None:
+                report.check(
+                    not (known_version(version) and version == 1),
+                    f"entry {index}: a version 1 {entry.get('kind')} after the version 2 seal at "
+                    f"entry {first_v2_seal}. Version 1 is read only for a chain written before "
+                    "version 2; once a record seals at version 2 it does not go back, since a "
+                    "version 1 seal names its cluster while the prediction is open and a "
+                    "version 1 reveal's reasons are not held to the codes.",
+                )
+            elif entry.get("kind") == "seal" and known_version(version) and version == 2:
+                first_v2_seal = index
         if entry.get("kind") == "seal":
             root = str(entry.get("registry_root", ""))
             # Structural at the seal and checkable at the reveal. A root on its own is
@@ -291,8 +434,185 @@ def verify_chain(chain: list[dict[str, Any]], report: Report) -> None:
                 f"{entry.get('numbers_commitment', 'missing')!r}, which is not a digest; the "
                 "probability, baseline and arm its reveal publishes could not be held to it",
             )
+            verify_seal_version(index, entry, report)
         previous = stated
     report.note(f"chain: {len(chain)} entries, intact, tip {previous[:16]}…")
+
+
+def verify_seal_version(index: int, entry: dict[str, Any], report: Report) -> None:
+    """A version 2 seal commits to its facets and names no cluster; a version 1 seal is as it was.
+
+    A cluster pseudonym on an open seal says which open predictions share a cluster, and a few
+    hundred of those say where the open predictions are concentrated. Version 2 commits to it,
+    with the other five facets, and publishes it only at the reveal.
+    """
+    version = entry_version(entry)
+    if not report.check(
+        known_version(version),
+        f"entry {index}: seal is entry_version {version!r}; this script reads versions "
+        f"{list(ENTRY_VERSIONS)}",
+    ):
+        return
+    if version == 1:
+        report.check(
+            "facets_commitment" not in entry,
+            f"entry {index}: a version 1 seal carries a facets_commitment, which only a version "
+            "2 seal carries",
+        )
+        return
+    report.check(
+        is_digest(entry.get("facets_commitment")),
+        f"entry {index}: version 2 seal carries facets_commitment "
+        f"{entry.get('facets_commitment', 'missing')!r}, which is not a digest; the cluster, "
+        "group, category, dates and flag its reveal publishes could not be held to it",
+    )
+    report.check(
+        "cluster_pseudonym" not in entry,
+        f"entry {index}: version 2 seal carries a cluster_pseudonym. A version 2 seal commits "
+        "to its cluster and does not name it while the prediction is open.",
+    )
+
+
+def verify_reveal_facets(entry: dict[str, Any], seal: dict[str, Any], report: Report) -> None:
+    """Step 2c: a version 2 reveal's six facets open the commitment its seal published."""
+    where = f"reveal at seq {entry.get('seq')}"
+    facets_nonce = entry.get("facets_nonce")
+    if not report.check(
+        is_digest(facets_nonce),
+        f"{where} gives its facets_nonce as {entry.get('facets_nonce', 'nothing')!r}; without "
+        "it the cluster, group, category, dates and flag it publishes cannot be checked "
+        "against its seal",
+    ):
+        return
+    facets = {field: entry.get(field) for field in FACETS_FIELDS}
+    opened = commitment(facets, str(facets_nonce), FACETS_DOMAIN)
+    report.check(
+        opened == seal.get("facets_commitment"),
+        f"{where}: its six facets with its facets_nonce hash to {opened}, not to the "
+        f"facets_commitment its seal published, {seal.get('facets_commitment')}. The facts it "
+        "is grouped and counted by are not the ones sealed.",
+    )
+
+
+def verify_reveal_codes(entry: dict[str, Any], report: Report) -> None:
+    """Step 2d: a version 2 reveal's reasons are codes from the closed lists in VERIFY.md."""
+    where = f"reveal at seq {entry.get('seq')}"
+    outcome = entry.get("outcome")
+    allowed = REASON_CODES.get(str(outcome))
+    if not report.check(
+        allowed is not None,
+        f"{where} has outcome {outcome!r}, which is not one of {sorted(REASON_CODES)}",
+    ):
+        return
+    assert allowed is not None
+    reason = entry.get("reason", "")
+    if report.check(
+        isinstance(reason, str) and (reason == "" or reason in allowed),
+        f"{where} gives its reason as {reason!r}; on {outcome} it must be "
+        + (f"one of {list(allowed)}" if allowed else "empty")
+        + ". A published reason is a code, never a sentence.",
+    ):
+        report.check(
+            bool(reason) or outcome not in REASON_REQUIRED,
+            f"{where} is {outcome} and gives no reason code; it is counted against the record "
+            f"and must say which of {list(allowed)} applies",
+        )
+    withheld = entry.get("withheld")
+    if withheld:
+        report.check(
+            entry.get("withheld_reason") in WITHHELD_REASONS,
+            f"{where} is withheld and gives its withheld_reason as "
+            f"{entry.get('withheld_reason', 'nothing')!r}; it must be one of "
+            f"{list(WITHHELD_REASONS)}",
+        )
+    else:
+        report.check(
+            "withheld_reason" not in entry,
+            f"{where} is open and carries a withheld_reason",
+        )
+    void = entry.get("void_condition_id")
+    if outcome != "VOID":
+        report.check(
+            void is None,
+            f"{where} is {outcome} and names void condition {void!r}; only a VOID names one",
+        )
+    elif withheld:
+        report.check(
+            void in WITHHELD_VOID_CODES,
+            f"{where} is a withheld VOID naming void condition {void!r}; a withheld reveal "
+            f"names one of {list(WITHHELD_VOID_CODES)}",
+        )
+    else:
+        conditions = _mapping(entry.get("prediction")).get("void_conditions")
+        conditions = conditions if isinstance(conditions, list) else []
+        ids = [c.get("id") for c in conditions if isinstance(c, dict)]
+        report.check(
+            void in ids,
+            f"{where} is a VOID naming void condition {void!r}, which is not one its prediction "
+            f"enumerated ({ids})",
+        )
+
+
+def verify_reveal_agrees(entry: dict[str, Any], seal: dict[str, Any], report: Report) -> None:
+    """Step 2e: what a reveal says at its top level agrees with its seal and its own openings.
+
+    On both versions. The quarter of the deadline is the seal's; an open reveal's category and
+    dates are its prediction's; the tier is the one inside the baseline the numbers commitment
+    opened; the policy is the seal's.
+    """
+    where = f"reveal at seq {entry.get('seq')}"
+    report.check(
+        quarter_of(entry.get("resolution_deadline")) == seal.get("deadline_quarter"),
+        f"{where} gives its deadline as {entry.get('resolution_deadline')!r}, whose quarter is "
+        f"{quarter_of(entry.get('resolution_deadline'))!r}; its seal said "
+        f"{seal.get('deadline_quarter')!r}",
+    )
+    report.check(
+        entry.get("policy_hash") == seal.get("policy_hash"),
+        f"{where} is under policy {entry.get('policy_hash')!r} and the seal it names under "
+        f"{seal.get('policy_hash')!r}",
+    )
+    withheld = bool(entry.get("withheld"))
+    prediction = entry.get("prediction") if not withheld else None
+    prediction = prediction if isinstance(prediction, dict) else {}
+    baseline = entry.get("baseline") if withheld else prediction.get("baseline")
+    tier = baseline.get("tier") if isinstance(baseline, dict) else None
+    report.check(
+        entry.get("baseline_tier") == tier,
+        f"{where} gives baseline_tier {entry.get('baseline_tier')!r}, and the baseline its "
+        f"numbers commitment opened is tier {tier!r}",
+    )
+    if withheld:
+        return
+    for field in ("category", "resolution_date", "resolution_deadline"):
+        report.check(
+            entry.get(field) == prediction.get(field),
+            f"{where} gives {field} {entry.get(field)!r} and the prediction it opened says "
+            f"{prediction.get(field)!r}",
+        )
+
+
+def verify_one_group_per_cluster(reveals: list[dict[str, Any]], report: Report) -> None:
+    """Step 2f: under one policy, a cluster sits in one correlation group.
+
+    Every interval is resampled over groups. A cluster split across two groups under one policy
+    would count as two independent bets what the policy calls one. Two policies may group a
+    cluster differently, and nothing pools them.
+    """
+    groups: dict[tuple[str, str], set[str]] = {}
+    for entry in reveals:
+        cluster = entry.get("cluster_pseudonym")
+        group = entry.get("correlation_group_pseudonym")
+        if not cluster or not group:
+            continue
+        key = (str(entry.get("policy_hash")), str(cluster))
+        groups.setdefault(key, set()).add(str(group))
+    for (policy_hash, cluster), seen in sorted(groups.items()):
+        report.check(
+            len(seen) == 1,
+            f"under policy {policy_hash}, cluster {cluster} is in {len(seen)} correlation groups "
+            f"({sorted(seen)}); under one policy a cluster is in one group",
+        )
 
 
 def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
@@ -320,12 +640,31 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
             f"{revealed.get(seal_seq)} already opened; a seal is opened once",
         )
         revealed.setdefault(seal_seq, entry.get("seq"))
+        version = entry_version(entry)
+        if not report.check(
+            known_version(version),
+            f"reveal at seq {entry.get('seq')} is entry_version {version!r}; this script reads "
+            f"versions {list(ENTRY_VERSIONS)}",
+        ):
+            continue
         report.check(
-            entry.get("cluster_pseudonym") == seal.get("cluster_pseudonym"),
-            f"reveal at seq {entry.get('seq')} is in cluster {entry.get('cluster_pseudonym')!r} "
-            f"and the seal it names in {seal.get('cluster_pseudonym')!r}; one of the two is "
-            "not this prediction's",
+            version == entry_version(seal),
+            f"reveal at seq {entry.get('seq')} is version {version} and names a version "
+            f"{entry_version(seal)!r} seal; a reveal and its seal are one version",
         )
+        if version == 1:
+            # Version 1 only: its seal named the cluster in the open. A version 2 seal commits
+            # to it instead, and the facets check below holds the reveal to that.
+            report.check(
+                entry.get("cluster_pseudonym") == seal.get("cluster_pseudonym"),
+                f"reveal at seq {entry.get('seq')} is in cluster "
+                f"{entry.get('cluster_pseudonym')!r} and the seal it names in "
+                f"{seal.get('cluster_pseudonym')!r}; one of the two is not this prediction's",
+            )
+        else:
+            verify_reveal_facets(entry, seal, report)
+            verify_reveal_codes(entry, report)
+        verify_reveal_agrees(entry, seal, report)
         report.check(
             entry.get("commitment") == seal.get("commitment"),
             f"reveal at seq {entry.get('seq')}: commitment does not match the seal it names. "
@@ -338,7 +677,7 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
         # The numbers every score is computed from, opened against the seal's own commitment
         # to them. On a withheld reveal this is the only thing that binds them to the seal;
         # on an open one it checks the seal's two commitments agree.
-        source = entry if entry.get("withheld") else (entry.get("prediction") or {})
+        source = entry if entry.get("withheld") else _mapping(entry.get("prediction"))
         numbers_nonce = entry.get("numbers_nonce")
         if report.check(
             is_digest(numbers_nonce),
@@ -396,6 +735,7 @@ def verify_reveals(chain: list[dict[str, Any]], report: Report) -> None:
             f"{recomputed}, not to the sealed commitment {entry.get('commitment')}. This is "
             "the whole point of the record and it does not check out.",
         )
+    verify_one_group_per_cluster([e for e in chain if e.get("kind") == "reveal"], report)
     report.note(f"reveals: {opened} opened in full and verified, {withheld} with the text withheld")
     if withheld:
         report.note(
@@ -529,9 +869,12 @@ def verify_sample_size(
     interval on the scoreboard is resampled over groups. A record that inflates either is
     claiming a larger sample than it has.
     """
-    clusters = {e["cluster_pseudonym"] for e in chain if e.get("cluster_pseudonym")}
+    # From the reveals alone: a version 2 seal names no cluster, and a version 1 seal's is the
+    # same pseudonym its reveal repeats.
+    opened = [e for e in chain if e.get("kind") == "reveal"]
+    clusters = {e["cluster_pseudonym"] for e in opened if e.get("cluster_pseudonym")}
     groups = {
-        e["correlation_group_pseudonym"] for e in chain if e.get("correlation_group_pseudonym")
+        e["correlation_group_pseudonym"] for e in opened if e.get("correlation_group_pseudonym")
     }
     # One board per track since the fast track, each checked against the reveals sealed
     # under its own policy hash; a scoreboard from before that has one board at the top.
@@ -576,7 +919,7 @@ def verify_sample_size(
             )
     report.note(
         f"sample size: {len(clusters)} distinct cluster(s) and {len(groups)} correlation "
-        f"group(s) in the chain"
+        f"group(s) in the reveals"
     )
 
 
@@ -637,9 +980,9 @@ def _stage_units(
         stages.setdefault(f"by_tier.{tier}", set()).add(unit)
         if tier not in HEADLINE_TIERS or entry.get("contamination_risk"):
             continue
-        prediction = entry.get("prediction") or {}
-        baseline = (entry.get("baseline") if entry.get("withheld") else None) or (
-            prediction.get("baseline") or {}
+        prediction = _mapping(entry.get("prediction"))
+        baseline = _mapping(
+            (entry.get("baseline") if entry.get("withheld") else None) or prediction.get("baseline")
         )
         q = number(baseline.get("probability"))
         if q is None or low is None or high is None or not (low <= q <= high):
@@ -789,6 +1132,12 @@ def day_ordinal(text: Any) -> int:
     return dt.date.fromisoformat(str(text)[:10]).toordinal()
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    """``value`` when it is an object, else an empty one: a forged reveal whose prediction or
+    baseline is a string or a number is reported by the checks that read it, not a traceback."""
+    return value if isinstance(value, dict) else {}
+
+
 def verify_scores(chain: list[dict[str, Any]], report: Report) -> None:
     """Step 5: recompute the scores yourself. No published number should need trusting."""
     ours = theirs = Decimal(0)
@@ -798,11 +1147,11 @@ def verify_scores(chain: list[dict[str, Any]], report: Report) -> None:
             continue
         if entry.get("withheld"):
             p = number(entry.get("probability"))
-            q = number((entry.get("baseline") or {}).get("probability"))
+            q = number(_mapping(entry.get("baseline")).get("probability"))
         else:
-            prediction = entry.get("prediction") or {}
+            prediction = _mapping(entry.get("prediction"))
             p = number(prediction.get("probability"))
-            q = number((prediction.get("baseline") or {}).get("probability"))
+            q = number(_mapping(prediction.get("baseline")).get("probability"))
         if p is None or q is None:
             skipped += 1
             continue
@@ -1113,13 +1462,37 @@ def verify_review(chain: list[dict[str, Any]], scoreboard: dict[str, Any], repor
     )
 
 
+def _whole_or_none(value: Any) -> int | None:
+    """A count as a published file states it: an int and not a bool, or nothing."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def verify_publications(directory: Path, chain: list[dict[str, Any]], report: Report) -> None:
-    """Step 7: the publication ledger is itself a chain, and its counts must fit the record."""
-    rows = read_jsonl(directory / "publications.jsonl")
-    if not rows:
+    """Step 7: the publication ledger is itself a chain, and every row fits the record.
+
+    Every row, not only the newest. Each row names the chain as it stood when that publication
+    was made -- its length, its tip and its count of seals -- and the chain only ever grows, so
+    each of those has to be a prefix of the chain in front of you. Checking only the newest row
+    let a record cut its chain short and restamp that one row; the rows before it still name
+    the entries it cut.
+    """
+    path = directory / "publications.jsonl"
+    if not report.check(
+        path.is_file(),
+        "publications.jsonl is missing. Every publication adds a line to it, so a record "
+        "without it is not one this script can check, and cannot be counted as a pass.",
+    ):
+        return
+    rows = read_jsonl(path)
+    if not report.check(
+        bool(rows),
+        "publications.jsonl is empty. Every publication adds a line to it, including the one "
+        "you are reading.",
+    ):
         return
     previous = GENESIS
     sealed_so_far = 0
+    entries_so_far = 0
     for index, row in enumerate(rows):
         stated = str(row.get("entry_hash", ""))
         if not report.check(
@@ -1137,13 +1510,47 @@ def verify_publications(directory: Path, chain: list[dict[str, Any]], report: Re
             "unconditional, so a gap is an outage or a lie, not a quiet week.",
         ):
             return
+        sealed = _whole_or_none(row.get("sealed_total"))
+        entries = _whole_or_none(row.get("chain_entries"))
         if not report.check(
-            int(row.get("sealed_total", 0)) >= sealed_so_far,
+            sealed is not None and entries is not None,
+            f"publications.jsonl line {index}: chain_entries is {row.get('chain_entries')!r} "
+            f"and sealed_total {row.get('sealed_total')!r}; both are counts, and without them "
+            "this row cannot be held to the chain",
+        ):
+            return
+        assert sealed is not None and entries is not None
+        if not report.check(
+            sealed >= sealed_so_far,
             f"publications.jsonl line {index}: the running count of sealed commitments went "
             "down. Commitments are never unsealed.",
         ):
             return
-        sealed_so_far = int(row.get("sealed_total", 0))
+        if not report.check(
+            entries_so_far <= entries <= len(chain),
+            f"publications.jsonl line {index}: publication {index} covered {entries} chain "
+            f"entries; the publication before it covered {entries_so_far} and chain.jsonl holds "
+            f"{len(chain)}. The chain only grows, so every publication names a part of it that "
+            "is still there.",
+        ):
+            return
+        tip_then = chain[entries - 1]["entry_hash"] if entries else GENESIS
+        if not report.check(
+            str(row.get("chain_tip", "")) == tip_then,
+            f"publications.jsonl line {index}: publication {index} names chain tip "
+            f"{row.get('chain_tip')!r} at {entries} entries, which is not this chain's tip at "
+            f"that length ({tip_then!r}). The chain it published is not the start of this one.",
+        ):
+            return
+        seals_then = sum(1 for e in chain[:entries] if e.get("kind") == "seal")
+        if not report.check(
+            sealed == seals_then,
+            f"publications.jsonl line {index}: publication {index} counted {sealed} sealed "
+            f"commitment(s) in its first {entries} entries; this chain holds {seals_then} there",
+        ):
+            return
+        sealed_so_far = sealed
+        entries_so_far = entries
         previous = stated
     seals = sum(1 for e in chain if e.get("kind") == "seal")
     report.check(
@@ -1156,51 +1563,170 @@ def verify_publications(directory: Path, chain: list[dict[str, Any]], report: Re
         "the newest publication names a chain tip that is not this chain's tip",
     )
     report.note(
-        f"publications: {len(rows)} in an unbroken ledger, newest claiming {sealed_so_far} "
-        "sealed commitment(s)"
+        f"publications: {len(rows)} in an unbroken ledger, each naming a prefix of this chain, "
+        f"newest claiming {sealed_so_far} sealed commitment(s)"
     )
 
 
+def manifest_name_problem(name: Any) -> str | None:
+    """Why ``name`` cannot be a file MANIFEST.json covers, or ``None``.
+
+    A manifest names files inside the record, by a plain relative path with forward slashes.
+    An absolute path, a drive, a backslash or a ``..`` would have this script hash a file on
+    your machine that the record does not contain, and report on it as though it did.
+    """
+    if not isinstance(name, str) or not name:
+        return "is not a file name"
+    if "\\" in name or "\x00" in name:
+        return "is not a plain relative path"
+    if PurePosixPath(name).is_absolute() or PureWindowsPath(name).drive:
+        return "is an absolute path, outside the record"
+    parts = name.split("/")
+    if ".." in parts:
+        return "climbs out of the record with '..'"
+    if any(part in ("", ".") for part in parts):
+        return "is not a plain relative path"
+    return None
+
+
+def manifest_digest(directory: Path, name: str) -> tuple[str | None, str]:
+    """The SHA-256 of one file MANIFEST.json names, or ``None`` and why it was not read.
+
+    Only a regular file inside the record, reached without a link, and no larger than
+    :data:`MANIFEST_MAX_BYTES`. A device, a pipe or a link is refused rather than followed.
+    """
+    problem = manifest_name_problem(name)
+    if problem is not None:
+        return None, f"{name!r} {problem}"
+    path = directory / name
+    here = directory
+    for part in name.split("/"):
+        here = here / part
+        try:
+            info = os.lstat(here)
+        except OSError:
+            return None, f"{name} is listed in MANIFEST.json but missing"
+        if stat.S_ISLNK(info.st_mode):
+            return None, f"{name} is reached through a link, which could point anywhere"
+    if not stat.S_ISREG(info.st_mode):
+        return None, f"{name} is not a regular file"
+    if info.st_size > MANIFEST_MAX_BYTES:
+        return None, f"{name} is {info.st_size} bytes, more than any file this record holds"
+    digest = hashlib.sha256()
+    read = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            read += len(chunk)
+            if read > MANIFEST_MAX_BYTES:
+                return None, f"{name} grew past {MANIFEST_MAX_BYTES} bytes while it was read"
+            digest.update(chunk)
+    return digest.hexdigest(), ""
+
+
 def verify_manifest(directory: Path, report: Report) -> None:
-    """Step 8: the files are the files."""
+    """Step 8: the files are the files, and only files inside the record."""
     manifest_path = directory / "MANIFEST.json"
     if not manifest_path.exists():
         report.check(False, "MANIFEST.json is missing")
         return
     manifest = read_json(manifest_path)
-    for name, expected in sorted(manifest.get("files", {}).items()):
-        path = directory / name
-        if not report.check(path.exists(), f"{name} is listed in MANIFEST.json but missing"):
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not report.check(
+        isinstance(files, dict), "MANIFEST.json carries no `files` object naming digests"
+    ):
+        return
+    assert isinstance(files, dict)
+    for name in MANIFEST_MUST_COVER:
+        report.check(
+            name in files,
+            f"MANIFEST.json does not cover {name}. The anchored manifest digest is what ties "
+            f"{name} to a Bitcoin block, and a manifest that leaves it out ties nothing.",
+        )
+    wrong = 0
+    for name, expected in sorted(files.items()):
+        actual, problem = manifest_digest(directory, name)
+        if not report.check(actual is not None, f"MANIFEST.json: {problem}"):
+            wrong += 1
             continue
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        report.check(actual == expected, f"{name}: sha256 is {actual}, manifest says {expected}")
-    report.note(f"manifest: {len(manifest.get('files', {}))} files, digests match")
+        if not report.check(
+            actual == expected, f"{name}: sha256 is {actual}, manifest says {expected}"
+        ):
+            wrong += 1
+    if wrong:
+        report.note(f"manifest: {len(files)} files, {wrong} of them not as MANIFEST.json says")
+    else:
+        report.note(f"manifest: {len(files)} files, digests match")
 
 
-def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> None:
-    """Step 9: the publication signature, where one is present."""
+def verify_tip(
+    directory: Path, chain: list[dict[str, Any]], report: Report, expected_key: str | None = None
+) -> None:
+    """Step 9: the publication signature, and that the key which made it is this record's.
+
+    Three things, and the last is the one a signature alone never gives you. tip.json names
+    this chain's tip and length; its signature checks out against the public half it carries;
+    and that public half is this record's publish key -- the one :data:`PUBLISH_KEY` carries,
+    and the one ``expected_key`` names when a reader passes it. A record whose chain was cut
+    and whose tip was signed again under a freshly made key passes the first two and fails the
+    third, which is why the third is never skipped.
+    """
     path = directory / "tip.json"
     if not path.exists():
-        report.note(
-            "tip.json: absent. Nobody has signed this publication, so it proves nothing about "
-            "who produced it beyond the hashes themselves."
+        ledger = read_jsonl(directory / "publications.jsonl")
+        signed = [str(row.get("seq")) for row in ledger if row.get("signed")]
+        report.check(
+            False,
+            "tip.json is missing, so nothing here is signed"
+            + (
+                f", and publications.jsonl says publication(s) {', '.join(signed)} were"
+                if signed
+                else ""
+            )
+            + ". A publication of this record carries its signed tip; one without it could have "
+            "been cut short or rewritten by anybody.",
         )
         return
     tip = read_json(path)
+    if not report.check(isinstance(tip, dict), "tip.json is not a JSON object"):
+        return
     expected = chain[-1]["entry_hash"] if chain else None
     report.check(
         tip.get("tip") == expected,
         f"tip.json signs the digest {tip.get('tip')}, but chain.jsonl ends at {expected}",
     )
     report.check(
-        int(tip.get("entries", -1)) == len(chain),
+        _whole_or_none(tip.get("entries")) == len(chain),
         f"tip.json covers {tip.get('entries')} entries; chain.jsonl has {len(chain)}",
     )
     actor = tip.get("actor")
     public_keys = tip.get("public_keys") or {}
-    if not isinstance(actor, dict) or not public_keys:
+    if not isinstance(actor, dict) or not isinstance(public_keys, dict) or not public_keys:
         report.check(False, "tip.json carries no actor envelope or no public key to check it")
         return
+    key_id = str(actor.get("key_id", ""))
+    if not report.check(
+        key_id in public_keys,
+        f"tip.json is signed by key {key_id!r}, whose public half it does not publish",
+    ):
+        return
+    key = str(public_keys[key_id]).lower()
+    if not report.check(
+        is_digest(key), f"tip.json gives the public half of {key_id!r} as {key!r}, not a key"
+    ):
+        return
+    # The key before the signature, because this needs no package: a tip signed under the
+    # wrong key fails here even on a machine that cannot check a signature at all.
+    pins = [("PUBLISH_KEY in verify.py", PUBLISH_KEY)]
+    if expected_key:
+        pins.append(("--expect-key", expected_key))
+    for where, pin in pins:
+        if not report.check(
+            key == pin,
+            f"tip.json is signed by key {key}, and {where} expects this record's publish key "
+            f"{pin}. A tip signed under any other key is not this record's, whatever else "
+            "about it checks out: anybody can make a key and sign with it.",
+        ):
+            return
     # A broken install is caught as widely as a missing one. An import of `cryptography`
     # whose native half is unusable does not raise ImportError: it can abort inside the Rust
     # extension and surface as a panic, which does not inherit from Exception, and a reader
@@ -1219,7 +1745,7 @@ def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> 
             "VERIFY.md gives the bytes to check the signature against by hand."
         )
         return
-    signed = {
+    signed_bytes = {
         "actor": {k: v for k, v in actor.items() if k != "signature"},
         "payload": {
             "tip": tip.get("tip"),
@@ -1227,21 +1753,97 @@ def verify_tip(directory: Path, chain: list[dict[str, Any]], report: Report) -> 
             "exported_at": tip.get("exported_at"),
         },
     }
-    message = SIGNATURE_DOMAIN + b"\x00" + canonical(signed)
-    key_id = str(actor.get("key_id", ""))
-    if not report.check(
-        key_id in public_keys,
-        f"tip.json is signed by key {key_id!r}, whose public half it does not publish",
-    ):
-        return
+    message = SIGNATURE_DOMAIN + b"\x00" + canonical(signed_bytes)
     try:
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_keys[key_id])).verify(
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(key)).verify(
             bytes.fromhex(str(actor.get("signature", ""))), message
         )
     except (InvalidSignature, ValueError) as error:
         report.check(False, f"tip.json: the signature does not check out ({error})")
         return
+    report.signed_by = key
+    report.pinned_by = [where for where, _ in pins]
     report.note(f"tip.json: signed by {key_id} over this exact tip, signature valid")
+
+
+def signed_day(exported_at: Any) -> str | None:
+    """The UTC day of a tip's ``exported_at`` as ``YYYY-MM-DD``, or ``None`` if not a time."""
+    try:
+        moment = dt.datetime.fromisoformat(str(exported_at))
+    except ValueError:
+        return None
+    offset = moment.utcoffset()
+    if offset is not None:
+        moment = moment.replace(tzinfo=None) - offset
+    return moment.date().isoformat()
+
+
+def verify_ledger_head(
+    directory: Path,
+    report: Report,
+    *,
+    at_least: int | None = None,
+    ledger_prefix: str | None = None,
+) -> None:
+    """Step 9b: the newest ledger line is the signed one, and it is no older than you have seen.
+
+    tip.json is signed and publications.jsonl is not, so a line could be added to the ledger
+    after the signature, or the whole record served as it stood a week ago. The first is held
+    to the signature by its day: the newest line's ``at`` is the day tip.json was signed. The
+    second no file here can refuse, because every file in an older copy is genuine; what refuses
+    it is what the reader already knows, passed as ``at_least`` (the newest publication they have
+    seen) and ``ledger_prefix`` (the ``entry_hash`` of a ledger line they have seen).
+    """
+    path = directory / "publications.jsonl"
+    rows = read_jsonl(path) if path.is_file() else []
+    newest = _whole_or_none(rows[-1].get("seq")) if rows else None
+    report.newest_publication = newest
+    report.newest_line = str(rows[-1].get("entry_hash", "")) if rows else None
+    tip_path = directory / "tip.json"
+    tip = read_json(tip_path) if tip_path.is_file() else None
+    if rows and isinstance(tip, dict):
+        day = signed_day(tip.get("exported_at"))
+        report.signed_on = day
+        report.check(
+            day is not None and str(rows[-1].get("at", "")) == day,
+            f"publications.jsonl ends at publication {rows[-1].get('seq')!r}, dated "
+            f"{rows[-1].get('at')!r}, and tip.json was signed at {tip.get('exported_at')!r}. "
+            "The newest line of the ledger is the publication tip.json signs, so the two carry "
+            "one day; a line dated otherwise was added after the signature, or the signature "
+            "is not this line's.",
+        )
+    if at_least is not None:
+        report.check(
+            newest is not None and newest >= at_least,
+            f"--expect-at-least {at_least}: publications.jsonl ends at publication "
+            f"{'none' if newest is None else newest}. You have seen publication {at_least}, so "
+            "this copy is older than one you already hold: every signature in it may be "
+            "genuine, and it is still not the newest state of this record.",
+        )
+    if ledger_prefix is not None:
+        found = [
+            index
+            for index, row in enumerate(rows)
+            if str(row.get("entry_hash", "")) == ledger_prefix
+        ]
+        if report.check(
+            bool(found),
+            f"--expect-ledger-prefix {ledger_prefix}: no line of publications.jsonl has that "
+            "entry_hash. The ledger you saw is not the start of this one: it was cut back "
+            "below that line, or rewritten. Or the copy you kept that hash from was the forged "
+            "one: ledger lines are not signed, so a line appended to a genuine copy passes, and "
+            "its hash is the one you kept.",
+        ):
+            report.note(
+                f"publications: the line you named is publication {found[0]} here, so every line "
+                "up to it is the ledger you saw"
+            )
+    if at_least is not None and newest is not None and newest >= at_least:
+        report.note(
+            f"publications: the ledger reaches publication {newest}, and you expected at least "
+            f"{at_least}. Its lines are unsigned, so this alone does not refuse an older copy "
+            "with lines appended to reach it"
+        )
 
 
 # -- OpenTimestamps, enough of it to read a proof without leaving this machine ---------
@@ -1598,8 +2200,68 @@ def _verify_anchor_proofs(directory: Path, rows: list[dict[str, Any]], report: R
     )
 
 
+def parse_arguments(argv: list[str]) -> argparse.Namespace:
+    """``[directory] [--expect-key KEY]``, where ``argv[0]`` is this script's own name."""
+    parser = argparse.ArgumentParser(
+        prog="verify.py",
+        description="Verify Second Derivative's public record. VERIFY.md is the normative text.",
+    )
+    parser.add_argument("directory", nargs="?", default=".", help="the record (default: here)")
+    parser.add_argument(
+        "--expect-key",
+        metavar="KEY",
+        help="this record's publish key, 64 hex characters, as you learned it out of band; a "
+        "tip signed under any other key fails",
+    )
+    parser.add_argument(
+        "--expect-at-least",
+        metavar="SEQ",
+        help="the newest publication you have already seen, by its seq in publications.jsonl; "
+        "a record whose ledger ends before it fails",
+    )
+    parser.add_argument(
+        "--expect-ledger-prefix",
+        metavar="HASH",
+        help="the entry_hash of a publications.jsonl line you have already seen, 64 hex "
+        "characters; a record whose ledger has no line with it fails",
+    )
+    return parser.parse_args(argv[1:])
+
+
 def main(argv: list[str]) -> int:
-    directory = Path(argv[1] if len(argv) > 1 else ".")
+    arguments = parse_arguments(argv)
+    directory = Path(arguments.directory)
+    expected_key: str | None = None
+    if arguments.expect_key is not None:
+        expected_key = str(arguments.expect_key).strip().lower()
+        if not is_digest(expected_key):
+            print(
+                f"INCOMPLETE: --expect-key {arguments.expect_key!r} is not a key. It takes the "
+                "publish key's Ed25519 public half as 64 hex characters, as tip.json writes "
+                "it under `public_keys`. Nothing was checked and nothing failed."
+            )
+            return 2
+    at_least: int | None = None
+    if arguments.expect_at_least is not None:
+        text = str(arguments.expect_at_least).strip()
+        if not (text.isascii() and text.isdigit()):
+            print(
+                f"INCOMPLETE: --expect-at-least {arguments.expect_at_least!r} is not a "
+                "publication. It takes the `seq` of the newest publications.jsonl line you have "
+                "seen, a whole number from 0. Nothing was checked and nothing failed."
+            )
+            return 2
+        at_least = int(text)
+    ledger_prefix: str | None = None
+    if arguments.expect_ledger_prefix is not None:
+        ledger_prefix = str(arguments.expect_ledger_prefix).strip().lower()
+        if not is_digest(ledger_prefix):
+            print(
+                f"INCOMPLETE: --expect-ledger-prefix {arguments.expect_ledger_prefix!r} is not "
+                "an entry_hash. It takes the `entry_hash` of a publications.jsonl line you have "
+                "seen, as 64 hex characters. Nothing was checked and nothing failed."
+            )
+            return 2
     chain = read_jsonl(directory / "chain.jsonl")
     reveals = read_jsonl(directory / "reveals.jsonl")
     scoreboard_path = directory / "scoreboard.json"
@@ -1625,7 +2287,8 @@ def main(argv: list[str]) -> int:
         verify_review(chain, scoreboard, report)
         verify_publications(directory, chain, report)
     verify_manifest(directory, report)
-    verify_tip(directory, chain, report)
+    verify_tip(directory, chain, report, expected_key)
+    verify_ledger_head(directory, report, at_least=at_least, ledger_prefix=ledger_prefix)
     verify_anchors(directory, scoreboard, report)
 
     for note in report.notes:
@@ -1649,6 +2312,36 @@ def main(argv: list[str]) -> int:
         return 2
     print()
     print("OK. Every check in VERIFY.md passes on these files.")
+    print(
+        f"Newest publication here: {report.newest_publication}, signed {report.signed_on}. That "
+        "is a state the key holder signed, not proof it is the latest."
+    )
+    if ledger_prefix is not None:
+        print(
+            "  The ledger continues the line you named with --expect-ledger-prefix, so it is not "
+            "older than the ledger you saw or a rewrite of it."
+        )
+    elif at_least is not None:
+        print(
+            f"  The ledger reaches publication {at_least}, but its lines are not signed: lines "
+            "appended to an older copy can reach that seq too. Only --expect-ledger-prefix, with "
+            "the entry_hash of a line you kept, refuses an older copy."
+        )
+    else:
+        print(
+            "  To refuse an older copy, pass --expect-ledger-prefix with the entry_hash of a "
+            "line you kept from an earlier run, as VERIFY.md describes."
+        )
+    print(
+        f"  Keep this for your next run: --expect-ledger-prefix {report.newest_line} (the "
+        f"entry_hash of publication {report.newest_publication}'s line in publications.jsonl)."
+    )
+    print(f"Publish key: {report.signed_by}")
+    print(
+        f"  tip.json is signed by this key, and it is the one {' and '.join(report.pinned_by)} "
+        "names. That is all a signature can say: compare the key with one you found yourself, "
+        "as VERIFY.md describes, before you take it as this record's."
+    )
     return 0
 
 
