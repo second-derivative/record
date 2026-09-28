@@ -4,10 +4,10 @@
     "VERIFY.md": "5d5983d05c155e3136c31319d710f4da4f65b297b1469a60f829482b71ecadc6",
     "canon-vectors.json": "a2ac9c9c8599597d205ea88e509708059bca92e86e12fd172638daaf97ccb3bf",
     "chain.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "publications.jsonl": "99b7c5a802ce653d916393e9006583492acacbb9baaa117cc6fe678fcbae3675",
+    "publications.jsonl": "7156a4cb843e18b53224b30b497d488db92d0e2280f2f9f49629164312baa995",
     "reveals.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scoreboard.json": "b0eb277654c13a845636fa685939abe89631cb75ad2916956a4b6572ca12f6bb",
-    "tip.json": "d3c306535c7e8941efb22b2db5ff69a3dc1b357820fde6ba156928a8aa15e1f1",
+    "scoreboard.json": "c9a89b94b04ed148766d1c95f29a76d14ec149b6eaa7bbf61617f6306c0b2cbd",
+    "tip.json": "b9f589bc195ebd5df656775bd64a90ee9c13720047ed50f4d833c3f3760efce1",
     "verify.py": "ea9dfd60b8a0b201566966f934aef120bc2fecc61578a5f0958441f8744beb21"
   },
   "note": "anchors/ is excluded on purpose: the manifest covers the record, the anchor index points at the manifest, and nothing hashes itself."
