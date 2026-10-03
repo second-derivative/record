@@ -10,23 +10,23 @@
   "anchoring": {
     "anchored": true,
     "anchored_from_seq": 3,
-    "attempted": 12,
-    "confirmed": 12,
-    "confirmed_through_seq": 14,
+    "attempted": 13,
+    "confirmed": 13,
+    "confirmed_through_seq": 15,
     "contiguous": true,
-    "excludes_publication_seq": 15,
+    "excludes_publication_seq": 16,
     "failed": 0,
     "first_gap_at_seq": null,
-    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 15's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 15's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
+    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 16's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 16's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
     "pending": 0
   },
-  "as_of": "2026-10-02",
+  "as_of": "2026-10-03",
   "chain": {
     "entries": 0,
     "intact": true,
     "tip": null
   },
-  "exported_at": "2026-10-02T05:00:24.474617+00:00",
+  "exported_at": "2026-10-03T05:00:10.303214+00:00",
   "never_pooled": true,
   "policy_versions": [],
   "recomputation": {
