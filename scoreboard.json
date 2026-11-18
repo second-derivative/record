@@ -10,23 +10,23 @@
   "anchoring": {
     "anchored": true,
     "anchored_from_seq": 3,
-    "attempted": 58,
-    "confirmed": 58,
-    "confirmed_through_seq": 60,
+    "attempted": 59,
+    "confirmed": 59,
+    "confirmed_through_seq": 61,
     "contiguous": true,
-    "excludes_publication_seq": 61,
+    "excludes_publication_seq": 62,
     "failed": 0,
     "first_gap_at_seq": null,
-    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 61's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 61's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
+    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 62's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 62's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
     "pending": 0
   },
-  "as_of": "2026-11-17",
+  "as_of": "2026-11-18",
   "chain": {
-    "entries": 8,
+    "entries": 9,
     "intact": true,
-    "tip": "b709698eb21d23bda4e5c2edbf6736688c503e5d2106c9abd143db910d8c56b6"
+    "tip": "0208ac14874bef9fe0951c7648892d92d0bb935be3611642f35fb230da3763e9"
   },
-  "exported_at": "2026-11-17T05:00:29.937735+00:00",
+  "exported_at": "2026-11-18T05:00:19.683244+00:00",
   "never_pooled": true,
   "policy_versions": [],
   "recomputation": {
@@ -48,10 +48,10 @@
     "lapsed": 0,
     "released": 0,
     "waiting": {
-      "held_ever": 6,
-      "oldest_waiting_days": 7,
-      "on": "2026-11-09",
-      "waiting": 6
+      "held_ever": 10,
+      "oldest_waiting_days": 15,
+      "on": "2026-11-17",
+      "waiting": 10
     }
   },
   "seals_by_day": {},
