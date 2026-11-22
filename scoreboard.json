@@ -10,23 +10,23 @@
   "anchoring": {
     "anchored": true,
     "anchored_from_seq": 3,
-    "attempted": 62,
-    "confirmed": 62,
-    "confirmed_through_seq": 64,
+    "attempted": 63,
+    "confirmed": 63,
+    "confirmed_through_seq": 65,
     "contiguous": true,
-    "excludes_publication_seq": 65,
+    "excludes_publication_seq": 66,
     "failed": 0,
     "first_gap_at_seq": null,
-    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 65's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 65's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
+    "note": "Each confirmed proof shows the manifest digest existed before the block it names, as the calendar's upgraded proof has it. Run `ots verify` on the files in anchors/ to check that against Bitcoin yourself; this record does not. These counts are of the rows in anchors/index.jsonl as they stood when this file was written, which is before publication 66's own row: that row stamps the digest of the MANIFEST.json covering this file, so a count in here cannot include it without changing the digest it names. Publication 66's row is written as this publication is delivered and is in anchors/index.jsonl beside this file, so expect exactly one more row there than `attempted` says.",
     "pending": 0
   },
-  "as_of": "2026-11-21",
+  "as_of": "2026-11-22",
   "chain": {
     "entries": 10,
     "intact": true,
     "tip": "4bdd6f1035aa300652127ac2df359720a5e8add26864e80cd960e40207e01d8b"
   },
-  "exported_at": "2026-11-21T05:00:32.674375+00:00",
+  "exported_at": "2026-11-22T05:00:21.550849+00:00",
   "never_pooled": true,
   "policy_versions": [],
   "recomputation": {
